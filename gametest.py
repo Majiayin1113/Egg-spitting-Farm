@@ -24,8 +24,9 @@ ROUND_TIME = 60
 LEVEL_CONFIG = {
 	1: {"target": 180, "blocks": False},
 	2: {"target": 300, "blocks": True},
+	3: {"target": 800, "blocks": True},
 }
-PIPE_COST_SCHEDULE = [10, 20, 25, 40]
+PIPE_COST_SCHEDULE = [10, 20, 25, 40, 60]
 PIPE_HEIGHT = 180
 PIPE_SPEED = 1000
 BALL_RADIUS = 12
@@ -36,7 +37,7 @@ BLOCK_COST = 20
 BLOCK_SLOW_FACTOR = 0.35
 BLOCK_BONUS = 2
 BLOCK_DURATION = 5.0
-BLOCK_COST_SCHEDULE = [20, 40, 80]
+BLOCK_COST_SCHEDULE = [20, 40, 80, 100]
 
 
 def build_z_path(
