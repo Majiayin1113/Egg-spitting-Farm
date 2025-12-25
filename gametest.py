@@ -12,6 +12,9 @@ import pygame
 
 WIDTH, HEIGHT = 900, 700
 SHOP_WIDTH = 160
+UTILITY_WIDTH = 160
+FONT_LARGE_SIZE = 34
+FONT_SMALL_SIZE = 20
 BG_COLOR = (12, 16, 25)
 TRACK_COLOR = (51, 178, 255)
 MACHINE_COLOR = (255, 180, 64)
@@ -37,7 +40,18 @@ BLOCK_COST = 20
 BLOCK_SLOW_FACTOR = 0.35
 BLOCK_BONUS = 2
 BLOCK_DURATION = 5.0
-BLOCK_COST_SCHEDULE = [20, 40, 80, 100]
+BLOCK_COST_SCHEDULE = [16, 25, 30, 38, 40, 50]
+SPEED_BOOST_DURATION = 3.0
+SPEED_BOOST_FACTOR = 2.0
+SPECIAL_EGG_VALUE = 10
+SPECIAL_EGG_COLORS = ((255, 250, 160), (255, 110, 150))
+COIN_RAIN_RATE = 8
+SKILL_BUTTON_HEIGHT = 56
+SKILL_PANEL_MARGIN = 16
+SKILL_INFO = {
+	"super_egg": {"title": "Lucky Egg", "desc": "Every 5th = 10 pts"},
+	"coin_rain": {"title": "Coin Rain", "desc": "+8 coins/sec"},
+}
 
 
 def build_z_path(
@@ -46,7 +60,7 @@ def build_z_path(
 	steps_per_segment: int = 36,
 ) -> List[Tuple[float, float]]:
 	left = SHOP_WIDTH + 40
-	right = width - 120
+	right = width - UTILITY_WIDTH - 40
 	top = 80
 	mid = height // 2 - 20
 	bottom = height - 70
@@ -119,6 +133,8 @@ class Ball:
 	used_pipes: set[int] = field(default_factory=set)
 	block_hits: set[int] = field(default_factory=set)
 	bonus_score: int = 0
+	score_value: int = 1
+	is_special: bool = False
 
 
 @dataclass
@@ -150,8 +166,8 @@ class SpiralGame:
 		pygame.display.set_caption("Z-Trail Drop")
 		self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
 		self.clock = pygame.time.Clock()
-		self.font_large = pygame.font.SysFont("consolas", 42)
-		self.font_small = pygame.font.SysFont("consolas", 24)
+		self.font_large = pygame.font.SysFont("consolas", FONT_LARGE_SIZE)
+		self.font_small = pygame.font.SysFont("consolas", FONT_SMALL_SIZE)
 
 		self.track_points = build_z_path(WIDTH, HEIGHT)
 		self.track_lengths = cumulative_lengths(self.track_points)
@@ -161,12 +177,44 @@ class SpiralGame:
 		self.shop_rect = pygame.Rect(0, 0, SHOP_WIDTH, HEIGHT)
 		self.pipe_button = pygame.Rect(20, 180, SHOP_WIDTH - 40, 140)
 		self.block_button = pygame.Rect(20, 360, SHOP_WIDTH - 40, 140)
+		self.utility_rect = pygame.Rect(WIDTH - UTILITY_WIDTH, 0, UTILITY_WIDTH, HEIGHT)
+		self.speed_boost_button = pygame.Rect(
+			self.utility_rect.x + 20,
+			200,
+			self.utility_rect.width - 40,
+			140,
+		)
+		skill_panel_height = 230
+		self.skill_panel_rect = pygame.Rect(
+			self.utility_rect.x + 10,
+			self.utility_rect.bottom - skill_panel_height - 20,
+			self.utility_rect.width - 20,
+			skill_panel_height,
+		)
+		btn_width = self.skill_panel_rect.width - 2 * SKILL_PANEL_MARGIN
+		btn_x = self.skill_panel_rect.x + SKILL_PANEL_MARGIN
+		btn_y = self.skill_panel_rect.y + 80
+		self.skill_buttons = {
+			"super_egg": pygame.Rect(btn_x, btn_y, btn_width, SKILL_BUTTON_HEIGHT),
+			"coin_rain": pygame.Rect(
+				btn_x,
+				btn_y + SKILL_BUTTON_HEIGHT + 10,
+				btn_width,
+				SKILL_BUTTON_HEIGHT,
+			),
+		}
 		self.pipe_counter = 0
 		self.block_counter = 0
 		self.pipes: List[PipeItem] = []
 		self.blocks: List[BlockItem] = []
 		self.placing_pipe: Optional[PipeItem] = None
 		self.placing_block: Optional[BlockItem] = None
+		self.speed_boost_active_until = 0
+		self.speed_boost_unlocked = False
+		self.skill_choice: Optional[str] = None
+		self.skill_selection_required = False
+		self.skill_coin_timer = 0.0
+		self.spawned_ball_count = 0
 		self.level_configs = LEVEL_CONFIG
 		self.max_level = max(self.level_configs.keys()) if self.level_configs else 1
 		self.current_level = max(1, min(start_level, self.max_level))
@@ -179,7 +227,7 @@ class SpiralGame:
 		self.score = 0
 		self.coins = 0
 		self.spawn_timer = 0.0
-		self.round_start_ms = pygame.time.get_ticks()
+		self.round_start_ms: Optional[int] = None
 		self.round_active = True
 		self.round_result: Optional[str] = None
 		self.pipes = []
@@ -190,6 +238,18 @@ class SpiralGame:
 		self.block_counter = 0
 		self.block_purchases = 0
 		self.placing_block = None
+		self.speed_boost_unlocked = self.current_level >= 3
+		self.speed_boost_active_until = 0
+		self.skill_choice = None
+		self.skill_selection_required = self.current_level >= 3
+		self.skill_coin_timer = 0.0
+		self.spawned_ball_count = 0
+		if not self.skill_selection_required:
+			self.start_round_clock()
+
+	def start_round_clock(self) -> None:
+		if self.round_start_ms is None:
+			self.round_start_ms = pygame.time.get_ticks()
 
 	def next_pipe_cost(self) -> int:
 		idx = min(self.pipe_purchases, len(PIPE_COST_SCHEDULE) - 1)
@@ -207,17 +267,75 @@ class SpiralGame:
 		cfg = self.level_configs.get(self.current_level, {})
 		return cfg.get("blocks", False)
 
+	def speed_boost_active(self) -> bool:
+		if not self.speed_boost_unlocked:
+			return False
+		return pygame.time.get_ticks() < self.speed_boost_active_until
+
+	def speed_boost_multiplier(self) -> float:
+		return SPEED_BOOST_FACTOR if self.speed_boost_active() else 1.0
+
+	def can_use_speed_boost(self) -> bool:
+		return (
+			self.speed_boost_unlocked
+			and not self.speed_boost_active()
+			and self.round_active
+			and self.round_start_ms is not None
+		)
+
+	def try_activate_speed_boost(self) -> None:
+		if not self.can_use_speed_boost():
+			return
+		self.speed_boost_active_until = pygame.time.get_ticks() + int(SPEED_BOOST_DURATION * 1000)
+
+	def skill_status_text(self) -> str:
+		if self.current_level < 3:
+			return "Passive: Locked"
+		if self.skill_choice:
+			info = SKILL_INFO.get(self.skill_choice, {})
+			return f"Passive: {info.get('title', 'Equipped')}"
+		if self.skill_selection_required:
+			return "Passive: Choose a perk"
+		return "Passive: None"
+
+	def handle_skill_selection_click(self, pos: Tuple[int, int]) -> bool:
+		if self.current_level < 3 or not self.skill_selection_required:
+			return False
+		for key, rect in self.skill_buttons.items():
+			if rect.collidepoint(pos):
+				self.select_skill(key)
+				return True
+		return False
+
+	def select_skill(self, key: str) -> None:
+		if key not in SKILL_INFO:
+			return
+		self.skill_choice = key
+		self.skill_selection_required = False
+		self.start_round_clock()
+
 	def spawn_ball(self) -> None:
-		self.balls.append(Ball(color_index=len(self.balls) % len(BALL_COLORS)))
+		self.spawned_ball_count += 1
+		special = self.skill_choice == "super_egg" and self.spawned_ball_count % 5 == 0
+		value = SPECIAL_EGG_VALUE if special else 1
+		color_index = len(self.balls) % len(BALL_COLORS)
+		self.balls.append(
+			Ball(
+				color_index=color_index,
+				score_value=value,
+				is_special=special,
+			)
+		)
 
 	def update_balls(self, dt: float) -> None:
 		completed: List[Ball] = []
+		multiplier = self.speed_boost_multiplier()
 		for ball in self.balls:
 			ball.last_distance = ball.distance
 			if self.apply_pipe(ball, dt):
 				continue
-			ball.speed = min(ball.speed + BALL_ACCEL * dt, BALL_MAX_SPEED)
-			ball.distance += ball.speed * dt
+			ball.speed = min(ball.speed + BALL_ACCEL * multiplier * dt, BALL_MAX_SPEED)
+			ball.distance += (ball.speed * multiplier) * dt
 			if not ball.in_pipe:
 				self.apply_block_effects(ball)
 			if self.apply_pipe(ball, dt):
@@ -227,12 +345,14 @@ class SpiralGame:
 		if completed:
 			if self.round_active:
 				for fin in completed:
-					gain = 1 + fin.bonus_score
+					gain = fin.score_value + fin.bonus_score
 					self.score += gain
 					self.coins += gain
 			self.balls = [b for b in self.balls if b not in completed]
 
 	def remaining_time(self) -> int:
+		if self.round_start_ms is None:
+			return ROUND_TIME
 		elapsed = (pygame.time.get_ticks() - self.round_start_ms) / 1000.0
 		remaining = max(0, ROUND_TIME - int(elapsed))
 		if remaining == 0 and self.round_active:
@@ -242,6 +362,8 @@ class SpiralGame:
 		return remaining
 
 	def update(self, dt: float) -> None:
+		if self.round_start_ms is None:
+			return
 		if self.round_active:
 			self.spawn_timer += dt
 			while self.spawn_timer >= SPAWN_INTERVAL:
@@ -249,6 +371,7 @@ class SpiralGame:
 				self.spawn_timer -= SPAWN_INTERVAL
 		self.update_balls(dt)
 		self.update_blocks()
+		self.apply_skill_income(dt)
 
 	def draw_track(self) -> None:
 		pygame.draw.lines(self.screen, TRACK_COLOR, False, self.track_points, 4)
@@ -276,8 +399,13 @@ class SpiralGame:
 					self.track_total,
 					self.ball_progress(ball),
 				)
-			color = BALL_COLORS[ball.color_index % len(BALL_COLORS)]
-			pygame.draw.circle(self.screen, color, (int(x), int(y)), BALL_RADIUS)
+			if ball.is_special:
+				outer, inner = SPECIAL_EGG_COLORS
+				pygame.draw.circle(self.screen, outer, (int(x), int(y)), BALL_RADIUS)
+				pygame.draw.circle(self.screen, inner, (int(x), int(y)), max(4, BALL_RADIUS - 4))
+			else:
+				color = BALL_COLORS[ball.color_index % len(BALL_COLORS)]
+				pygame.draw.circle(self.screen, color, (int(x), int(y)), BALL_RADIUS)
 
 	def draw_panel(self, remaining: int) -> None:
 		rect = pygame.Rect(SHOP_WIDTH + 20, 20, 260, 180)
@@ -314,6 +442,10 @@ class SpiralGame:
 		self.screen.blit(goal_text, (rect.x + 16, rect.y + 122))
 
 		status_y = rect.y + 148
+		if self.current_level >= 3:
+			skill_text = self.font_small.render(self.skill_status_text(), True, (160, 255, 200))
+			self.screen.blit(skill_text, (rect.x + 16, status_y))
+			status_y += 28
 		if not self.round_active:
 			if self.round_result == "fail":
 				fail_text = self.font_small.render(
@@ -330,7 +462,9 @@ class SpiralGame:
 				self.screen.blit(win_text, (rect.x + 16, status_y))
 
 	def draw_footer(self, remaining: int) -> None:
-		if not self.round_active:
+		if self.round_start_ms is None and self.current_level >= 3:
+			message = "Select a passive skill to start"
+		elif not self.round_active:
 			if self.round_result == "fail":
 				message = "Goal missed. Press Space to retry"
 			else:
@@ -342,7 +476,9 @@ class SpiralGame:
 		else:
 			message = "Catch every drop!"
 		text = self.font_small.render(message, True, (200, 200, 210))
-		self.screen.blit(text, (WIDTH - text.get_width() - 20, HEIGHT - 40))
+		x_pos = WIDTH - UTILITY_WIDTH - text.get_width() - 20
+		x_pos = max(SHOP_WIDTH + 20, x_pos)
+		self.screen.blit(text, (x_pos, HEIGHT - 40))
 
 	def draw_shop(self) -> None:
 		pygame.draw.rect(self.screen, (18, 26, 41), self.shop_rect)
@@ -395,6 +531,115 @@ class SpiralGame:
 
 		if self.blocks_enabled():
 			self.draw_block_button()
+
+	def draw_power_bar(self) -> None:
+		pygame.draw.rect(self.screen, (18, 26, 41), self.utility_rect)
+		pygame.draw.line(
+			self.screen,
+			PANEL_BORDER,
+			(self.utility_rect.x, 0),
+			(self.utility_rect.x, HEIGHT),
+			2,
+		)
+		title = self.font_small.render("Abilities", True, (255, 255, 255))
+		self.screen.blit(title, (self.utility_rect.x + 20, 20))
+		tip = self.font_small.render("Quick boosts", True, (150, 180, 210))
+		self.screen.blit(tip, (self.utility_rect.x + 20, 50))
+
+		btn_color = (70, 160, 140)
+		state_msg = "Click to surge"
+		locked = not self.speed_boost_unlocked
+		if locked:
+			btn_color = (45, 60, 90)
+			state_msg = "Unlock Lv3"
+		elif self.speed_boost_active():
+			btn_color = (220, 200, 90)
+			state_msg = "Active"
+
+		pygame.draw.rect(self.screen, btn_color, self.speed_boost_button, border_radius=10)
+		pygame.draw.rect(self.screen, (255, 255, 255), self.speed_boost_button, 2, border_radius=10)
+		label = self.font_small.render("Speed Boost", True, (12, 16, 25))
+		self.screen.blit(
+			label,
+			(
+				self.speed_boost_button.centerx - label.get_width() // 2,
+				self.speed_boost_button.y + 16,
+			),
+		)
+		sub = self.font_small.render(f"x{SPEED_BOOST_FACTOR:.1f} speed", True, (12, 16, 25))
+		self.screen.blit(
+			sub,
+			(
+				self.speed_boost_button.centerx - sub.get_width() // 2,
+				self.speed_boost_button.y + 46,
+			),
+		)
+		state_text = self.font_small.render(state_msg, True, (12, 16, 25))
+		self.screen.blit(
+			state_text,
+			(
+				self.speed_boost_button.centerx - state_text.get_width() // 2,
+				self.speed_boost_button.y + 76,
+			),
+		)
+		if self.speed_boost_active():
+			remaining = max(
+				0.0, (self.speed_boost_active_until - pygame.time.get_ticks()) / 1000.0
+			)
+			count_text = self.font_small.render(f"{remaining:0.1f}s", True, (12, 16, 25))
+			self.screen.blit(
+				count_text,
+				(
+					self.speed_boost_button.centerx - count_text.get_width() // 2,
+					self.speed_boost_button.y + 106,
+				),
+			)
+
+		self.draw_skill_panel()
+
+	def draw_skill_panel(self) -> None:
+		panel = self.skill_panel_rect
+		pygame.draw.rect(self.screen, PANEL_COLOR, panel, border_radius=12)
+		pygame.draw.rect(self.screen, PANEL_BORDER, panel, 2, border_radius=12)
+		title = self.font_small.render("Passive Skills", True, (255, 255, 255))
+		self.screen.blit(title, (panel.x + 12, panel.y + 10))
+		desc = self.font_small.render("Select before Lv3", True, (150, 180, 210))
+		self.screen.blit(desc, (panel.x + 12, panel.y + 34))
+		if self.current_level < 3:
+			locked = self.font_small.render("Unlocks at Level 3", True, (255, 180, 120))
+			self.screen.blit(locked, (panel.x + 12, panel.y + 70))
+			return
+		awaiting_choice = self.skill_selection_required and self.skill_choice is None
+		for key in ("super_egg", "coin_rain"):
+			rect = self.skill_buttons[key]
+			info = SKILL_INFO.get(key, {})
+			selected = self.skill_choice == key
+			if selected:
+				btn_color = (90, 200, 150)
+				state = "Active"
+			elif awaiting_choice:
+				btn_color = (70, 120, 200)
+				state = "Click to equip"
+			else:
+				btn_color = (45, 60, 90)
+				state = "Inactive"
+			pygame.draw.rect(self.screen, btn_color, rect, border_radius=10)
+			pygame.draw.rect(self.screen, (255, 255, 255), rect, 2, border_radius=10)
+			label = self.font_small.render(info.get("title", key.title()), True, (12, 16, 25))
+			self.screen.blit(
+				label,
+				(rect.centerx - label.get_width() // 2, rect.y + 6),
+			)
+			detail = self.font_small.render(info.get("desc", "Passive bonus"), True, (12, 16, 25))
+			self.screen.blit(
+				detail,
+				(rect.centerx - detail.get_width() // 2, rect.y + 30),
+			)
+			state_text = self.font_small.render(state, True, (12, 16, 25))
+			self.screen.blit(
+				state_text,
+				(rect.centerx - state_text.get_width() // 2, rect.y + SKILL_BUTTON_HEIGHT - 16),
+			)
 
 	def draw_block_button(self) -> None:
 		current_cost = self.next_block_cost()
@@ -475,6 +720,7 @@ class SpiralGame:
 
 			self.screen.fill(BG_COLOR)
 			self.draw_shop()
+			self.draw_power_bar()
 			self.draw_track()
 			self.draw_machine()
 			self.draw_balls()
@@ -486,15 +732,22 @@ class SpiralGame:
 		pygame.quit()
 
 	def handle_click(self, pos: Tuple[int, int]) -> None:
+		if self.handle_skill_selection_click(pos):
+			return
 		if self.pipe_button.collidepoint(pos):
 			self.try_purchase_pipe()
 			return
 		if self.blocks_enabled() and self.block_button.collidepoint(pos):
 			self.try_purchase_block()
 			return
-		if self.placing_pipe and pos[0] > SHOP_WIDTH + 20:
+		if self.speed_boost_button.collidepoint(pos):
+			self.try_activate_speed_boost()
+			return
+		play_min = SHOP_WIDTH + 20
+		play_max = WIDTH - UTILITY_WIDTH - 20
+		if self.placing_pipe and play_min < pos[0] < play_max:
 			self.place_pipe(pos)
-		elif self.placing_block and pos[0] > SHOP_WIDTH + 20:
+		elif self.placing_block and play_min < pos[0] < play_max:
 			self.place_block(pos)
 
 	def try_purchase_pipe(self) -> None:
@@ -524,7 +777,7 @@ class SpiralGame:
 	def place_pipe(self, pos: Tuple[int, int]) -> None:
 		if not self.placing_pipe:
 			return
-		x = max(SHOP_WIDTH + 80, min(WIDTH - 80, pos[0]))
+		x = max(SHOP_WIDTH + 80, min(WIDTH - UTILITY_WIDTH - 80, pos[0]))
 		intersections = self.track_intersections_at_x(x)
 		if len(intersections) < 2:
 			up = max(120, pos[1] - PIPE_HEIGHT // 2)
@@ -665,9 +918,18 @@ class SpiralGame:
 			block for block in self.blocks if (now - block.spawn_ms) / 1000.0 < BLOCK_DURATION
 		]
 
+	def apply_skill_income(self, dt: float) -> None:
+		if self.skill_choice != "coin_rain" or not self.round_active:
+			return
+		self.skill_coin_timer += dt
+		while self.skill_coin_timer >= 1.0:
+			self.coins += COIN_RAIN_RATE
+			self.skill_coin_timer -= 1.0
+
 	def apply_pipe(self, ball: Ball, dt: float) -> bool:
 		if not self.pipes:
 			return False
+		multiplier = self.speed_boost_multiplier()
 		if ball.in_pipe:
 			pipe = self.get_pipe_by_id(ball.pipe_id)
 			if not pipe or not pipe.rect:
@@ -675,7 +937,7 @@ class SpiralGame:
 				ball.pipe_id = None
 				return False
 			exit_y = pipe.exit_y or (pipe.rect.bottom - 10)
-			ball.pipe_y += PIPE_SPEED * dt
+			ball.pipe_y += PIPE_SPEED * multiplier * dt
 			if ball.pipe_y >= exit_y:
 				ball.pipe_y = exit_y
 				ball.in_pipe = False
