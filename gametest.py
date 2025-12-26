@@ -50,7 +50,7 @@ COIN_RAIN_RATE = 8
 SKILL_BUTTON_HEIGHT = 56
 SKILL_PANEL_MARGIN = 16
 SKILL_INFO = {
-	"super_egg": {"title": "Lucky Egg", "desc": "Every 5th egg becomes a Super +10 points Egg"},
+	"super_egg": {"title": "Lucky Egg", "desc": "Every 5th egg: Super Egg (+10 pts)"},
 	"coin_rain": {"title": "Coin Rain", "desc": "+8 coins/sec"},
 }
 SKILL_COLORS = {
@@ -442,17 +442,6 @@ class SpiralGame:
 		coin_text = self.font_small.render(f"Coins: {self.coins}", True, (255, 220, 140))
 		self.screen.blit(coin_text, (rect.x + 16, rect.y + 66))
 		
-		pipe_text = self.font_small.render(
-			f"Pipes: {len(self.pipes)}", True, (180, 220, 255)
-		)
-		self.screen.blit(pipe_text, (rect.x + 140, rect.y + 10))
-
-		if self.blocks_enabled():
-			block_text = self.font_small.render(
-				f"Blocks: {len(self.blocks)}", True, (200, 180, 255)
-			)
-			self.screen.blit(block_text, (rect.x + 140, rect.y + 38))
-
 		timer_text = self.font_small.render(f"Time: {remaining:02d}s", True, (180, 220, 255))
 		self.screen.blit(timer_text, (rect.x + 140, rect.y + 66))
 
