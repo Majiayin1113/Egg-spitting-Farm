@@ -74,9 +74,9 @@ SHOP_ITEM_DETAILS = {
 		"title": "Turbo Pipe",
 		"desc": "Lay a glowing lane that doubles egg speed along a segment.",
 	},
-	"gear": {
-		"title": "Lift Gear",
-		"desc": "Clockwise teeth scoop eggs upward when they fall into the slots.",
+	"bouncer": {
+		"title": "Bounce Pad",
+		"desc": "Arms every 10 eggs; a 5-pt egg will ricochet to start and share its value.",
 	},
 	"portal": {
 		"title": "Portal Pair",
@@ -93,12 +93,11 @@ TURBO_PIPE_LENGTH = 0.05  # portion of the track covered
 TURBO_PIPE_MULTIPLIER = 2.0
 TURBO_PIPE_COLOR = (255, 120, 40)
 
-GEAR_COST = 10
-GEAR_OUTER_RADIUS = 48
-GEAR_INNER_RADIUS = 28
-GEAR_TEETH_COUNT = 10
-GEAR_ROTATION_SPEED = math.pi  # radians per second
-GEAR_CAPTURE_MARGIN = 4
+BOUNCER_COST = 10
+BOUNCER_RADIUS = 38
+BOUNCER_PASS_INTERVAL = 10
+BOUNCER_NEIGHBOR_DISTANCE = 140.0
+BOUNCER_TRIGGER_SCORE = 5
 
 PORTAL_COST = 10
 PORTAL_ACTIVE_DURATION = 10.0
@@ -192,12 +191,6 @@ class Ball:
 	bonus_score: int = 0
 	score_value: int = 1
 	is_special: bool = False
-	in_gear: bool = False
-	gear_id: Optional[int] = None
-	gear_angle: float = 0.0
-	gear_radius: float = 0.0
-	gear_pos: Tuple[float, float] = (0.0, 0.0)
-	gear_hits: set[int] = field(default_factory=set)
 	portal_hits: set[int] = field(default_factory=set)
 
 
@@ -234,20 +227,14 @@ class TurboPipeItem:
 
 
 @dataclass
-class GearItem:
+class BouncerItem:
 	id: int = 0
-	cost: int = GEAR_COST
+	cost: int = BOUNCER_COST
 	center: Tuple[int, int] = (0, 0)
-	outer_radius: int = GEAR_OUTER_RADIUS
-	inner_radius: int = GEAR_INNER_RADIUS
-	teeth: int = GEAR_TEETH_COUNT
-	angular_speed: float = GEAR_ROTATION_SPEED
-	rotation: float = 0.0
-	entry_progress: float = 0.0
-	exit_progress: float = 0.0
-	entry_distance: float = 0.0
-	exit_distance: float = 0.0
-	release_progress: float = 0.0
+	progress: float = 0.0
+	radius: int = BOUNCER_RADIUS
+	passes_since_trigger: int = 0
+	armed: bool = False
 
 
 @dataclass
@@ -280,8 +267,8 @@ class SpiralGame:
 		first_y = 120
 		self.pipe_button = pygame.Rect(20, first_y, button_width, button_height)
 		self.block_button = pygame.Rect(20, self.pipe_button.bottom + button_gap, button_width, button_height)
-		self.gear_button = pygame.Rect(20, self.block_button.bottom + button_gap, button_width, button_height)
-		self.portal_button = pygame.Rect(20, self.gear_button.bottom + button_gap, button_width, button_height)
+		self.bouncer_button = pygame.Rect(20, self.block_button.bottom + button_gap, button_width, button_height)
+		self.portal_button = pygame.Rect(20, self.bouncer_button.bottom + button_gap, button_width, button_height)
 		self.turbo_button = pygame.Rect(20, self.portal_button.bottom + button_gap, button_width, button_height)
 		self.utility_rect = pygame.Rect(WIDTH - UTILITY_WIDTH, 0, UTILITY_WIDTH, HEIGHT)
 		self.speed_boost_button = pygame.Rect(
@@ -320,9 +307,9 @@ class SpiralGame:
 		self.turbo_counter = 0
 		self.turbo_purchases = 0
 		self.turbo_pipes: List[TurboPipeItem] = []
-		self.gear_counter = 0
-		self.gears: List[GearItem] = []
-		self.placing_gear: Optional[GearItem] = None
+		self.bouncer_counter = 0
+		self.bouncers: List[BouncerItem] = []
+		self.placing_bouncer: Optional[BouncerItem] = None
 		self.portal_counter = 0
 		self.portals: List[PortalItem] = []
 		self.placing_portal: Optional[PortalItem] = None
@@ -355,12 +342,12 @@ class SpiralGame:
 			preserved_pipes = self.clone_pipes()
 			preserved_blocks = self.clone_blocks()
 			preserved_turbos = self.clone_turbo_pipes()
-			preserved_gears = self.clone_gears()
+			preserved_bouncers = self.clone_bouncers()
 			preserved_portals = self.clone_portals()
 			pipe_counter = self.pipe_counter
 			block_counter = self.block_counter
 			turbo_counter = self.turbo_counter
-			gear_counter = self.gear_counter
+			bouncer_counter = self.bouncer_counter
 			portal_counter = self.portal_counter
 			pipe_purchases = getattr(self, "pipe_purchases", 0)
 			block_purchases = getattr(self, "block_purchases", 0)
@@ -369,12 +356,12 @@ class SpiralGame:
 			preserved_pipes = []
 			preserved_blocks = []
 			preserved_turbos = []
-			preserved_gears = []
+			preserved_bouncers = []
 			preserved_portals = []
 			pipe_counter = 0
 			block_counter = 0
 			turbo_counter = 0
-			gear_counter = 0
+			bouncer_counter = 0
 			portal_counter = 0
 			pipe_purchases = 0
 			block_purchases = 0
@@ -398,9 +385,9 @@ class SpiralGame:
 		self.turbo_counter = turbo_counter
 		self.turbo_purchases = turbo_purchases
 		self.placing_turbo_pipe = None
-		self.gears = preserved_gears
-		self.gear_counter = gear_counter
-		self.placing_gear = None
+		self.bouncers = preserved_bouncers
+		self.bouncer_counter = bouncer_counter
+		self.placing_bouncer = None
 		self.portals = preserved_portals
 		self.portal_counter = portal_counter
 		self.placing_portal = None
@@ -439,8 +426,8 @@ class SpiralGame:
 	def next_portal_cost(self) -> int:
 		return PORTAL_COST
 
-	def next_gear_cost(self) -> int:
-		return GEAR_COST
+	def next_bouncer_cost(self) -> int:
+		return BOUNCER_COST
 
 	def level_target(self) -> int:
 		cfg = self.level_configs.get(self.current_level, {})
@@ -453,7 +440,7 @@ class SpiralGame:
 	def turbo_enabled(self) -> bool:
 		return self.current_level >= 3
 
-	def gear_enabled(self) -> bool:
+	def bouncer_enabled(self) -> bool:
 		return self.current_level >= 3
 
 	def portal_enabled(self) -> bool:
@@ -562,17 +549,13 @@ class SpiralGame:
 			ball.last_distance = ball.distance
 			if self.apply_pipe(ball, dt):
 				continue
-			if ball.in_gear:
-				if self.advance_ball_in_gear(ball, dt):
-					continue
 			ball.speed = min(ball.speed + BALL_ACCEL * multiplier * dt, BALL_MAX_SPEED)
 			ball.distance += (ball.speed * multiplier) * dt
 			if not ball.in_pipe:
 				self.apply_turbo_effects(ball, dt, multiplier)
 				self.apply_block_effects(ball)
 				self.apply_portal_effects(ball)
-			if self.try_capture_gear(ball):
-				continue
+				self.process_bouncer_pass(ball)
 			if self.apply_pipe(ball, dt):
 				continue
 			if ball.distance >= self.track_total:
@@ -608,7 +591,6 @@ class SpiralGame:
 		self.update_blocks()
 		self.apply_skill_income(dt)
 		self.apply_rapid_fire(dt)
-		self.update_gears(dt)
 		self.update_portals()
 
 	def draw_track(self) -> None:
@@ -617,7 +599,7 @@ class SpiralGame:
 			if pipe.rect:
 				pygame.draw.rect(self.screen, (255, 255, 255), pipe.rect, border_radius=6)
 		self.draw_portals()
-		self.draw_gears()
+		self.draw_bouncers()
 		self.draw_turbo_pipes()
 		self.draw_blocks()
 
@@ -633,8 +615,6 @@ class SpiralGame:
 		for ball in self.balls:
 			if ball.in_pipe:
 				x, y = ball.pipe_x, ball.pipe_y
-			elif ball.in_gear and ball.gear_pos != (0.0, 0.0):
-				x, y = ball.gear_pos
 			else:
 				x, y = lerp_point(
 					self.track_points,
@@ -651,33 +631,30 @@ class SpiralGame:
 				pygame.draw.circle(self.screen, color, (int(x), int(y)), BALL_RADIUS)
 
 	def draw_panel(self, remaining: int) -> None:
-		rect = pygame.Rect(SHOP_WIDTH + 20, 20, 260, 180)
+		rect = pygame.Rect(SHOP_WIDTH + 16, 16, 220, 150)
 		pygame.draw.rect(self.screen, PANEL_COLOR, rect, border_radius=12)
 		pygame.draw.rect(self.screen, PANEL_BORDER, rect, width=2, border_radius=12)
 
 		score_text = self.font_large.render(f"Score: {self.score}", True, (255, 255, 255))
-		self.screen.blit(score_text, (rect.x + 16, rect.y + 10))
+		self.screen.blit(score_text, (rect.x + 14, rect.y + 8))
 
 		coin_text = self.font_small.render(f"Coins: {self.coins}", True, (255, 220, 140))
-		self.screen.blit(coin_text, (rect.x + 16, rect.y + 66))
-		
-		timer_text = self.font_small.render(f"Time: {remaining:02d}s", True, (180, 220, 255))
-		self.screen.blit(timer_text, (rect.x + 140, rect.y + 66))
+		self.screen.blit(coin_text, (rect.x + 14, rect.y + 50))
+
+		timer_text = self.font_small.render(f"{remaining:02d}s", True, (180, 220, 255))
+		timer_x = rect.right - timer_text.get_width() - 14
+		self.screen.blit(timer_text, (timer_x, rect.y + 50))
 
 		level_text = self.font_small.render(
 			f"Level {self.current_level}", True, (180, 220, 255)
 		)
-		self.screen.blit(level_text, (rect.x + 16, rect.y + 94))
+		self.screen.blit(level_text, (rect.x + 14, rect.y + 78))
 
 		target = self.level_target()
 		goal_text = self.font_small.render(f"Goal: {target}", True, (255, 200, 160))
-		self.screen.blit(goal_text, (rect.x + 16, rect.y + 122))
+		self.screen.blit(goal_text, (rect.x + 14, rect.y + 104))
 
-		status_y = rect.y + 148
-		if self.current_level >= ADVANCED_UNLOCK_LEVEL:
-			skill_text = self.font_small.render(self.skill_status_text(), True, (160, 255, 200))
-			self.screen.blit(skill_text, (rect.x + 16, status_y))
-			status_y += 28
+		status_y = rect.bottom - 32
 		if not self.round_active:
 			if self.round_result == "fail":
 				fail_text = self.font_small.render(
@@ -737,7 +714,7 @@ class SpiralGame:
 		if self.blocks_enabled():
 			self.draw_block_button()
 
-		self.draw_gear_button()
+		self.draw_bouncer_button()
 		self.draw_portal_button()
 		self.draw_turbo_button()
 
@@ -868,33 +845,6 @@ class SpiralGame:
 				(rect.centerx - state_text.get_width() // 2, rect.y + SKILL_BUTTON_HEIGHT - 16),
 			)
 
-	def draw_selected_skill_badge(self) -> None:
-		if not self.active_skills or self.skill_selection_required:
-			return
-		ordered_keys = [key for key in self.available_skill_keys() if key in self.active_skills]
-		if not ordered_keys:
-			return
-		badge_width = 220
-		badge_height = 40 + len(ordered_keys) * 28
-		margin = 20
-		x_pos = WIDTH - UTILITY_WIDTH - badge_width - margin
-		y_pos = HEIGHT - badge_height - 80
-		rect = pygame.Rect(x_pos, y_pos, badge_width, badge_height)
-		color = (80, 130, 210)
-		pygame.draw.rect(self.screen, color, rect, border_radius=12)
-		pygame.draw.rect(self.screen, (255, 255, 255), rect, 2, border_radius=12)
-		label = self.font_small.render("Passives Equipped", True, (12, 16, 25))
-		self.screen.blit(label, (rect.x + 12, rect.y + 8))
-		for idx, key in enumerate(ordered_keys):
-			info = SKILL_INFO.get(key, {})
-			title = info.get("title", key.title())
-			desc = info.get("desc", "")
-			title_text = self.font_small.render(title, True, (12, 16, 25))
-			desc_text = self.font_small.render(desc, True, (240, 240, 250))
-			y_line = rect.y + 32 + idx * 28
-			self.screen.blit(title_text, (rect.x + 12, y_line))
-			self.screen.blit(desc_text, (rect.x + 12, y_line + 14))
-
 	def draw_skill_overlay(self) -> None:
 		if self.current_level < ADVANCED_UNLOCK_LEVEL or not self.skill_selection_required:
 			self.skill_modal_buttons = {}
@@ -985,28 +935,28 @@ class SpiralGame:
 		self.draw_shop_icon(self.block_button, "block")
 		self.queue_shop_tooltip("block", self.block_button)
 
-	def draw_gear_button(self) -> None:
+	def draw_bouncer_button(self) -> None:
 		btn_color = (200, 120, 210)
-		cost = self.next_gear_cost()
-		unlocked = self.gear_enabled()
-		owned = bool(self.gears)
+		cost = self.next_bouncer_cost()
+		unlocked = self.bouncer_enabled()
+		placed = bool(self.bouncers)
 		note: Optional[str] = None
-		if self.placing_gear:
+		if self.placing_bouncer:
 			btn_color = (220, 210, 140)
 			note = "Click track to place"
-		elif owned:
+		elif placed:
 			btn_color = (120, 190, 150)
-			note = "Gear already placed"
+			note = "Pad ready"
 		elif not unlocked:
 			btn_color = (45, 50, 70)
 			note = "Unlocks at Level 3"
 		elif self.coins < cost:
 			btn_color = (55, 60, 90)
-		pygame.draw.rect(self.screen, btn_color, self.gear_button, border_radius=10)
-		pygame.draw.rect(self.screen, (255, 255, 255), self.gear_button, 2, border_radius=10)
-		self.draw_shop_cost(self.gear_button, cost)
-		self.draw_shop_icon(self.gear_button, "gear")
-		self.queue_shop_tooltip("gear", self.gear_button, locked_note=note)
+		pygame.draw.rect(self.screen, btn_color, self.bouncer_button, border_radius=10)
+		pygame.draw.rect(self.screen, (255, 255, 255), self.bouncer_button, 2, border_radius=10)
+		self.draw_shop_cost(self.bouncer_button, cost)
+		self.draw_shop_icon(self.bouncer_button, "bouncer")
+		self.queue_shop_tooltip("bouncer", self.bouncer_button, locked_note=note)
 
 	def draw_portal_button(self) -> None:
 		cost = self.next_portal_cost()
@@ -1118,22 +1068,18 @@ class SpiralGame:
 			pygame.draw.lines(self.screen, (255, 180, 90), False, points, 4)
 			pygame.draw.circle(self.screen, (255, 180, 90), (int(points[0][0]), int(points[0][1])), 3)
 			pygame.draw.circle(self.screen, (255, 180, 90), (int(points[-1][0]), int(points[-1][1])), 3)
-		elif icon_type == "gear":
+		elif icon_type == "bouncer":
 			center = inner.center
-			outer = inner.width // 2
-			teeth = 8
-			for idx in range(teeth):
-				angle = (2 * math.pi / teeth) * idx
-				inner_pt = (
-					center[0] + math.cos(angle) * (outer - 6),
-					center[1] + math.sin(angle) * (outer - 6),
-				)
-				outer_pt = (
-					center[0] + math.cos(angle) * outer,
-					center[1] + math.sin(angle) * outer,
-				)
-				pygame.draw.line(self.screen, (200, 240, 255), inner_pt, outer_pt, 2)
-			pygame.draw.circle(self.screen, (80, 140, 200), center, outer - 4, 2)
+			r = inner.width // 2
+			pygame.draw.circle(self.screen, (200, 220, 255), center, r, 2)
+			pygame.draw.circle(self.screen, (120, 150, 230), center, max(2, r - 5), 1)
+			pygame.draw.line(
+				self.screen,
+				(255, 200, 120),
+				(center[0], center[1] - r),
+				(center[0], center[1] + r),
+				2,
+			)
 		elif icon_type == "portal":
 			center = inner.center
 			r = inner.width // 2
@@ -1244,30 +1190,22 @@ class SpiralGame:
 				text_rect = freeze_text.get_rect(center=(cx, cy))
 				self.screen.blit(freeze_text, text_rect)
 
-	def draw_gears(self) -> None:
-		if not self.gears:
+	def draw_bouncers(self) -> None:
+		if not self.bouncers:
 			return
-		for gear in self.gears:
-			cx, cy = gear.center
-			outer = gear.outer_radius
-			inner = gear.inner_radius
-			pygame.draw.circle(self.screen, (20, 32, 44), (cx, cy), outer - 4)
-			pygame.draw.circle(self.screen, (170, 210, 255), (cx, cy), outer, width=4)
-			pygame.draw.circle(self.screen, (70, 110, 180), (cx, cy), inner, width=3)
-			teeth = max(gear.teeth, 6)
-			tooth_angle = (2 * math.pi) / teeth
-			for idx in range(teeth):
-				angle = gear.rotation + idx * tooth_angle
-				inner_pt = (
-					cx + math.cos(angle) * (outer - 6),
-					cy + math.sin(angle) * (outer - 6),
-				)
-				outer_pt = (
-					cx + math.cos(angle) * (outer + 6),
-					cy + math.sin(angle) * (outer + 6),
-				)
-				pygame.draw.line(self.screen, (200, 230, 255), inner_pt, outer_pt, 3)
-			pygame.draw.circle(self.screen, (255, 220, 140), (cx, cy + inner - 4), 6)
+		for bouncer in self.bouncers:
+			cx, cy = bouncer.center
+			radius = bouncer.radius
+			outer_rect = pygame.Rect(0, 0, radius * 2, radius * 2)
+			outer_rect.center = (cx, cy)
+			base_color = (60, 90, 150) if bouncer.armed else (35, 45, 70)
+			pygame.draw.circle(self.screen, base_color, (cx, cy), radius, width=3)
+			pygame.draw.circle(self.screen, (140, 210, 255), (cx, cy), max(6, radius - 8), width=2)
+			indicator_len = radius + 10
+			for angle in (math.pi / 2, -math.pi / 2):
+				x = cx + math.cos(angle) * indicator_len
+				y = cy + math.sin(angle) * indicator_len
+				pygame.draw.line(self.screen, (255, 200, 120), (cx, cy), (x, y), 2)
 
 	def run(self) -> None:
 		running = True
@@ -1301,7 +1239,6 @@ class SpiralGame:
 			self.draw_machine()
 			self.draw_balls()
 			self.draw_panel(remaining)
-			self.draw_selected_skill_badge()
 			self.draw_footer(remaining)
 			self.draw_skill_overlay()
 			self.draw_shop_tooltip()
@@ -1322,8 +1259,8 @@ class SpiralGame:
 		if self.blocks_enabled() and self.block_button.collidepoint(pos):
 			self.try_purchase_block()
 			return
-		if self.gear_button.collidepoint(pos):
-			self.try_purchase_gear()
+		if self.bouncer_button.collidepoint(pos):
+			self.try_purchase_bouncer()
 			return
 		if self.portal_button.collidepoint(pos):
 			self.try_purchase_portal()
@@ -1342,8 +1279,8 @@ class SpiralGame:
 			self.place_block(pos)
 		elif self.placing_turbo_pipe and play_min < pos[0] < play_max:
 			self.place_turbo_pipe(pos)
-		elif self.placing_gear and play_min < pos[0] < play_max:
-			self.place_gear(pos)
+		elif self.placing_bouncer and play_min < pos[0] < play_max:
+			self.place_bouncer(pos)
 		elif self.placing_portal and play_min < pos[0] < play_max:
 			self.place_portal(pos)
 
@@ -1352,7 +1289,7 @@ class SpiralGame:
 			self.placing_pipe
 			or self.placing_block
 			or self.placing_turbo_pipe
-			or self.placing_gear
+			or self.placing_bouncer
 			or self.placing_portal
 		):
 			return
@@ -1371,7 +1308,7 @@ class SpiralGame:
 			self.placing_block
 			or self.placing_pipe
 			or self.placing_turbo_pipe
-			or self.placing_gear
+			or self.placing_bouncer
 			or self.placing_portal
 		):
 			return
@@ -1390,7 +1327,7 @@ class SpiralGame:
 			self.placing_turbo_pipe
 			or self.placing_pipe
 			or self.placing_block
-			or self.placing_gear
+			or self.placing_bouncer
 			or self.placing_portal
 		):
 			return
@@ -1402,26 +1339,26 @@ class SpiralGame:
 		self.turbo_purchases += 1
 		self.placing_turbo_pipe = TurboPipeItem(id=self.turbo_counter, cost=cost)
 
-	def try_purchase_gear(self) -> None:
-		if not self.gear_enabled():
+	def try_purchase_bouncer(self) -> None:
+		if not self.bouncer_enabled():
 			return
-		if self.gears or self.placing_gear:
+		if self.bouncers or self.placing_bouncer:
 			return
 		if self.placing_pipe or self.placing_block or self.placing_turbo_pipe or self.placing_portal:
 			return
-		cost = self.next_gear_cost()
+		cost = self.next_bouncer_cost()
 		if self.coins < cost:
 			return
 		self.coins -= cost
-		self.gear_counter += 1
-		self.placing_gear = GearItem(id=self.gear_counter, cost=cost)
+		self.bouncer_counter += 1
+		self.placing_bouncer = BouncerItem(id=self.bouncer_counter, cost=cost)
 
 	def try_purchase_portal(self) -> None:
 		if not self.portal_enabled():
 			return
 		if self.placing_portal:
 			return
-		if self.placing_pipe or self.placing_block or self.placing_turbo_pipe or self.placing_gear:
+		if self.placing_pipe or self.placing_block or self.placing_turbo_pipe or self.placing_bouncer:
 			return
 		if len(self.portals) >= 2:
 			return
@@ -1497,22 +1434,17 @@ class SpiralGame:
 		self.turbo_pipes.sort(key=lambda item: item.start_progress)
 		self.placing_turbo_pipe = None
 
-	def place_gear(self, pos: Tuple[int, int]) -> None:
-		if not self.placing_gear:
+	def place_bouncer(self, pos: Tuple[int, int]) -> None:
+		if not self.placing_bouncer:
 			return
-		x, y, _ = self.nearest_point_on_track(pos)
-		gear = self.placing_gear
-		gear.center = (int(x), int(y))
-		gear.rotation = 0.0
-		for existing in self.gears:
-			distance = math.hypot(existing.center[0] - gear.center[0], existing.center[1] - gear.center[1])
-			if distance < existing.outer_radius + gear.outer_radius - 8:
-				return
-		if not self.configure_gear_geometry(gear):
-			return
-		self.gears.append(gear)
-		self.gears.sort(key=lambda item: item.entry_progress)
-		self.placing_gear = None
+		x, y, progress = self.nearest_point_on_track(pos)
+		bouncer = self.placing_bouncer
+		bouncer.center = (int(x), int(y))
+		bouncer.progress = progress
+		bouncer.passes_since_trigger = 0
+		bouncer.armed = False
+		self.bouncers = [bouncer]
+		self.placing_bouncer = None
 
 	def place_portal(self, pos: Tuple[int, int]) -> None:
 		if not self.placing_portal:
@@ -1633,23 +1565,6 @@ class SpiralGame:
 			)
 		return positions
 
-	def configure_gear_geometry(self, gear: GearItem) -> bool:
-		cx, cy = gear.center
-		bottom_point = (cx, cy + gear.inner_radius - GEAR_CAPTURE_MARGIN)
-		top_point = (cx, cy - gear.inner_radius + GEAR_CAPTURE_MARGIN)
-		_, _, bottom_progress = self.nearest_point_on_track(bottom_point)
-		_, _, top_progress = self.nearest_point_on_track(top_point)
-		entry_progress = max(bottom_progress, top_progress)
-		exit_progress = min(bottom_progress, top_progress)
-		if abs(entry_progress - exit_progress) < 1e-4:
-			return False
-		gear.entry_progress = entry_progress
-		gear.exit_progress = exit_progress
-		gear.entry_distance = self.progress_to_distance(entry_progress)
-		gear.exit_distance = self.progress_to_distance(exit_progress)
-		gear.release_progress = exit_progress
-		return True
-
 	def update_blocks(self) -> None:
 		if not self.blocks:
 			return
@@ -1675,12 +1590,6 @@ class SpiralGame:
 		while self.rapid_fire_timer >= RAPID_FIRE_INTERVAL:
 			self.spawn_ball()
 			self.rapid_fire_timer -= RAPID_FIRE_INTERVAL
-
-	def update_gears(self, dt: float) -> None:
-		if not self.gears:
-			return
-		for gear in self.gears:
-			gear.rotation = (gear.rotation + gear.angular_speed * dt) % (2 * math.pi)
 
 	def apply_pipe(self, ball: Ball, dt: float) -> bool:
 		if not self.pipes:
@@ -1757,7 +1666,7 @@ class SpiralGame:
 			return
 		if self.portal_state != "active":
 			return
-		if ball.in_pipe or ball.in_gear:
+		if ball.in_pipe:
 			return
 		ordered = sorted(self.portals[:2], key=lambda item: item.progress)
 		entry_portal, exit_portal = ordered[0], ordered[1]
@@ -1775,33 +1684,41 @@ class SpiralGame:
 		ball.last_distance = ball.distance
 		ball.speed = max(ball.speed, BALL_ACCEL * 0.1)
 
-	def advance_ball_in_gear(self, ball: Ball, dt: float) -> bool:
-		if not ball.in_gear:
-			return False
-		gear = self.get_gear_by_id(ball.gear_id)
-		if not gear:
-			ball.in_gear = False
-			ball.gear_pos = (0.0, 0.0)
-			ball.gear_id = None
-			return False
-		radius = ball.gear_radius or max(8, gear.inner_radius - GEAR_CAPTURE_MARGIN * 2)
-		ball.gear_radius = radius
-		ball.gear_angle -= gear.angular_speed * dt
-		ball.gear_pos = (
-			gear.center[0] + math.cos(ball.gear_angle) * radius,
-			gear.center[1] + math.sin(ball.gear_angle) * radius,
-		)
-		if ball.gear_angle <= -math.pi / 2:
-			release_distance = self.progress_to_distance(gear.release_progress)
-			ball.in_gear = False
-			ball.gear_id = None
-			ball.gear_hits.add(gear.id)
-			ball.distance = max(ball.distance, release_distance)
-			ball.last_distance = ball.distance
-			ball.speed = 0.0
-			ball.gear_pos = (0.0, 0.0)
-			return False
-		return True
+	def process_bouncer_pass(self, ball: Ball) -> None:
+		if not self.bouncers:
+			return
+		for bouncer in self.bouncers:
+			impact_distance = self.progress_to_distance(bouncer.progress)
+			if not (ball.last_distance < impact_distance <= ball.distance):
+				continue
+			bouncer.passes_since_trigger += 1
+			if bouncer.armed and ball.score_value == BOUNCER_TRIGGER_SCORE:
+				self.trigger_bouncer(bouncer, ball, impact_distance)
+				continue
+			if bouncer.passes_since_trigger >= BOUNCER_PASS_INTERVAL:
+				bouncer.armed = True
+				bouncer.passes_since_trigger = min(
+					bouncer.passes_since_trigger,
+					BOUNCER_PASS_INTERVAL,
+				)
+
+	def trigger_bouncer(self, bouncer: BouncerItem, ball: Ball, impact_distance: float) -> None:
+		ball.distance = 0.0
+		ball.last_distance = 0.0
+		ball.speed = 0.0
+		ball.in_pipe = False
+		ball.pipe_id = None
+		ball.used_pipes.clear()
+		ball.block_hits.clear()
+		ball.turbo_hits.clear()
+		ball.portal_hits.clear()
+		for neighbor in self.balls:
+			if neighbor is ball:
+				continue
+			if abs(neighbor.distance - impact_distance) <= BOUNCER_NEIGHBOR_DISTANCE:
+				neighbor.score_value = ball.score_value
+		bouncer.armed = False
+		bouncer.passes_since_trigger = 0
 
 	def update_portals(self) -> None:
 		if len(self.portals) < 2:
@@ -1822,39 +1739,6 @@ class SpiralGame:
 			if now >= self.portal_freeze_until:
 				self.portal_state = "active"
 				self.portal_active_until = now + int(PORTAL_ACTIVE_DURATION * 1000)
-
-	def try_capture_gear(self, ball: Ball) -> bool:
-		if not self.gears or ball.in_gear:
-			return False
-		for gear in self.gears:
-			if gear.id in ball.gear_hits:
-				continue
-			entry_distance = gear.entry_distance
-			distance_window = max(30.0, float(gear.outer_radius))
-			if ball.distance < gear.exit_distance - distance_window or ball.distance > entry_distance + distance_window:
-				continue
-			x, y = lerp_point(
-				self.track_points,
-				self.track_lengths,
-				self.track_total,
-				self.ball_progress(ball),
-			)
-			dx = x - gear.center[0]
-			dy = y - gear.center[1]
-			if dy < -GEAR_CAPTURE_MARGIN:
-				continue
-			dist = math.hypot(dx, dy)
-			if dist <= gear.inner_radius - GEAR_CAPTURE_MARGIN:
-				ball.in_gear = True
-				ball.gear_id = gear.id
-				ball.gear_angle = math.pi / 2
-				ball.gear_radius = max(8, gear.inner_radius - GEAR_CAPTURE_MARGIN * 2)
-				ball.speed = 0.0
-				ball.gear_pos = (gear.center[0], gear.center[1] + ball.gear_radius)
-				ball.distance = max(ball.distance, entry_distance)
-				ball.last_distance = ball.distance
-				return True
-		return False
 
 	def clone_pipes(self) -> List[PipeItem]:
 		"""Make deep copies of all placed pipes so layouts can persist."""
@@ -1908,25 +1792,19 @@ class SpiralGame:
 			)
 		return clones
 
-	def clone_gears(self) -> List[GearItem]:
-		"""Copy placed gears so they persist across carried levels."""
-		clones: List[GearItem] = []
-		for gear in self.gears:
+	def clone_bouncers(self) -> List[BouncerItem]:
+		"""Copy bounce pads so they persist across carried levels."""
+		clones: List[BouncerItem] = []
+		for bouncer in self.bouncers:
 			clones.append(
-				GearItem(
-					id=gear.id,
-					cost=gear.cost,
-					center=gear.center,
-					outer_radius=gear.outer_radius,
-					inner_radius=gear.inner_radius,
-					teeth=gear.teeth,
-					angular_speed=gear.angular_speed,
-					rotation=0.0,
-					entry_progress=gear.entry_progress,
-					exit_progress=gear.exit_progress,
-					entry_distance=gear.entry_distance,
-					exit_distance=gear.exit_distance,
-					release_progress=gear.release_progress,
+				BouncerItem(
+					id=bouncer.id,
+					cost=bouncer.cost,
+					center=bouncer.center,
+					progress=bouncer.progress,
+					radius=bouncer.radius,
+					passes_since_trigger=bouncer.passes_since_trigger,
+					armed=bouncer.armed,
 				)
 			)
 		return clones
@@ -1952,14 +1830,6 @@ class SpiralGame:
 		for pipe in self.pipes:
 			if pipe.id == pipe_id:
 				return pipe
-		return None
-
-	def get_gear_by_id(self, gear_id: Optional[int]) -> Optional[GearItem]:
-		if gear_id is None:
-			return None
-		for gear in self.gears:
-			if gear.id == gear_id:
-				return gear
 		return None
 
 
