@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from bisect import bisect_left
 from dataclasses import dataclass, field
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import pygame
 
@@ -40,17 +40,22 @@ BLOCK_COST = 20
 BLOCK_SLOW_FACTOR = 0.35
 BLOCK_BONUS = 2
 BLOCK_DURATION = 5.0
-BLOCK_COST_SCHEDULE = [16, 25, 30, 38, 40, 50]
+BLOCK_COST_SCHEDULE = [16, 25, 30, 38, 40, 50,80,100,120,150]
 SPEED_BOOST_DURATION = 3.0
 SPEED_BOOST_FACTOR = 2.0
+SPEED_BOOST_COOLDOWN = 20.0
 SPECIAL_EGG_VALUE = 10
 SPECIAL_EGG_COLORS = ((255, 250, 160), (255, 110, 150))
 COIN_RAIN_RATE = 8
 SKILL_BUTTON_HEIGHT = 56
 SKILL_PANEL_MARGIN = 16
 SKILL_INFO = {
-	"super_egg": {"title": "Lucky Egg", "desc": "Every 5th = 10 pts"},
+	"super_egg": {"title": "Lucky Egg", "desc": "Every 5th egg becomes a Super +10 points Egg"},
 	"coin_rain": {"title": "Coin Rain", "desc": "+8 coins/sec"},
+}
+SKILL_COLORS = {
+	"super_egg": (90, 200, 150),
+	"coin_rain": (90, 140, 220),
 }
 
 
@@ -210,10 +215,12 @@ class SpiralGame:
 		self.placing_pipe: Optional[PipeItem] = None
 		self.placing_block: Optional[BlockItem] = None
 		self.speed_boost_active_until = 0
+		self.speed_boost_cooldown_until = 0
 		self.speed_boost_unlocked = False
 		self.skill_choice: Optional[str] = None
 		self.skill_selection_required = False
 		self.skill_coin_timer = 0.0
+		self.skill_modal_buttons: Dict[str, pygame.Rect] = {}
 		self.spawned_ball_count = 0
 		self.level_configs = LEVEL_CONFIG
 		self.max_level = max(self.level_configs.keys()) if self.level_configs else 1
@@ -240,9 +247,11 @@ class SpiralGame:
 		self.placing_block = None
 		self.speed_boost_unlocked = self.current_level >= 3
 		self.speed_boost_active_until = 0
+		self.speed_boost_cooldown_until = 0
 		self.skill_choice = None
 		self.skill_selection_required = self.current_level >= 3
 		self.skill_coin_timer = 0.0
+		self.skill_modal_buttons = {}
 		self.spawned_ball_count = 0
 		if not self.skill_selection_required:
 			self.start_round_clock()
@@ -275,10 +284,20 @@ class SpiralGame:
 	def speed_boost_multiplier(self) -> float:
 		return SPEED_BOOST_FACTOR if self.speed_boost_active() else 1.0
 
+	def speed_boost_cooldown_remaining(self) -> float:
+		if not self.speed_boost_unlocked:
+			return 0.0
+		now = pygame.time.get_ticks()
+		if self.speed_boost_active() or now >= self.speed_boost_cooldown_until:
+			return 0.0
+		return max(0.0, (self.speed_boost_cooldown_until - now) / 1000.0)
+
 	def can_use_speed_boost(self) -> bool:
+		now = pygame.time.get_ticks()
 		return (
 			self.speed_boost_unlocked
 			and not self.speed_boost_active()
+			and now >= self.speed_boost_cooldown_until
 			and self.round_active
 			and self.round_start_ms is not None
 		)
@@ -286,7 +305,11 @@ class SpiralGame:
 	def try_activate_speed_boost(self) -> None:
 		if not self.can_use_speed_boost():
 			return
-		self.speed_boost_active_until = pygame.time.get_ticks() + int(SPEED_BOOST_DURATION * 1000)
+		now = pygame.time.get_ticks()
+		self.speed_boost_active_until = now + int(SPEED_BOOST_DURATION * 1000)
+		self.speed_boost_cooldown_until = self.speed_boost_active_until + int(
+			SPEED_BOOST_COOLDOWN * 1000
+		)
 
 	def skill_status_text(self) -> str:
 		if self.current_level < 3:
@@ -301,7 +324,8 @@ class SpiralGame:
 	def handle_skill_selection_click(self, pos: Tuple[int, int]) -> bool:
 		if self.current_level < 3 or not self.skill_selection_required:
 			return False
-		for key, rect in self.skill_buttons.items():
+		buttons = self.skill_modal_buttons or self.skill_buttons
+		for key, rect in buttons.items():
 			if rect.collidepoint(pos):
 				self.select_skill(key)
 				return True
@@ -549,12 +573,16 @@ class SpiralGame:
 		btn_color = (70, 160, 140)
 		state_msg = "Click to surge"
 		locked = not self.speed_boost_unlocked
+		cooldown_remaining = self.speed_boost_cooldown_remaining()
 		if locked:
 			btn_color = (45, 60, 90)
 			state_msg = "Unlock Lv3"
 		elif self.speed_boost_active():
 			btn_color = (220, 200, 90)
 			state_msg = "Active"
+		elif cooldown_remaining > 0:
+			btn_color = (55, 80, 110)
+			state_msg = "Cooldown"
 
 		pygame.draw.rect(self.screen, btn_color, self.speed_boost_button, border_radius=10)
 		pygame.draw.rect(self.screen, (255, 255, 255), self.speed_boost_button, 2, border_radius=10)
@@ -587,6 +615,15 @@ class SpiralGame:
 				0.0, (self.speed_boost_active_until - pygame.time.get_ticks()) / 1000.0
 			)
 			count_text = self.font_small.render(f"{remaining:0.1f}s", True, (12, 16, 25))
+			self.screen.blit(
+				count_text,
+				(
+					self.speed_boost_button.centerx - count_text.get_width() // 2,
+					self.speed_boost_button.y + 106,
+				),
+			)
+		elif cooldown_remaining > 0:
+			count_text = self.font_small.render(f"{cooldown_remaining:0.1f}s", True, (12, 16, 25))
 			self.screen.blit(
 				count_text,
 				(
@@ -639,6 +676,68 @@ class SpiralGame:
 			self.screen.blit(
 				state_text,
 				(rect.centerx - state_text.get_width() // 2, rect.y + SKILL_BUTTON_HEIGHT - 16),
+			)
+
+	def draw_selected_skill_badge(self) -> None:
+		if not self.skill_choice or self.skill_selection_required:
+			return
+		info = SKILL_INFO.get(self.skill_choice, {})
+		badge_width = 200
+		badge_height = 80
+		margin = 20
+		x_pos = WIDTH - UTILITY_WIDTH - badge_width - margin
+		y_pos = HEIGHT - badge_height - 80
+		rect = pygame.Rect(x_pos, y_pos, badge_width, badge_height)
+		color = SKILL_COLORS.get(self.skill_choice, (90, 120, 200))
+		pygame.draw.rect(self.screen, color, rect, border_radius=12)
+		pygame.draw.rect(self.screen, (255, 255, 255), rect, 2, border_radius=12)
+		label = self.font_small.render("Passive Equipped", True, (12, 16, 25))
+		self.screen.blit(label, (rect.x + 12, rect.y + 8))
+		title = info.get("title", "Passive")
+		title_text = self.font_large.render(title, True, (12, 16, 25))
+		self.screen.blit(title_text, (rect.x + 12, rect.y + 28))
+		desc_text = self.font_small.render(info.get("desc", ""), True, (12, 16, 25))
+		self.screen.blit(desc_text, (rect.x + 12, rect.y + 56))
+
+	def draw_skill_overlay(self) -> None:
+		if self.current_level < 3 or not self.skill_selection_required:
+			self.skill_modal_buttons = {}
+			return
+		self.skill_modal_buttons = {}
+		dimmer = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+		dimmer.fill((0, 0, 0, 170))
+		self.screen.blit(dimmer, (0, 0))
+		panel_w, panel_h = 560, 300
+		panel_rect = pygame.Rect(0, 0, panel_w, panel_h)
+		panel_rect.center = (WIDTH // 2, HEIGHT // 2 - 20)
+		pygame.draw.rect(self.screen, PANEL_COLOR, panel_rect, border_radius=16)
+		pygame.draw.rect(self.screen, PANEL_BORDER, panel_rect, 2, border_radius=16)
+		title = self.font_large.render("Select Your Passive", True, (255, 255, 255))
+		self.screen.blit(title, (panel_rect.centerx - title.get_width() // 2, panel_rect.y + 20))
+		sub = self.font_small.render("Select a passive before Level 3 begins", True, (180, 220, 255))
+		self.screen.blit(sub, (panel_rect.centerx - sub.get_width() // 2, panel_rect.y + 64))
+		prompt = self.font_small.render("Click left or right to choose", True, (255, 220, 160))
+		self.screen.blit(prompt, (panel_rect.centerx - prompt.get_width() // 2, panel_rect.y + 88))
+		btn_width = (panel_w - 3 * 50) // 2
+		btn_height = 140
+		btn_y = panel_rect.y + 130
+		for idx, key in enumerate(("super_egg", "coin_rain")):
+			btn_x = panel_rect.x + 50 + idx * (btn_width + 50)
+			btn_rect = pygame.Rect(btn_x, btn_y, btn_width, btn_height)
+			self.skill_modal_buttons[key] = btn_rect
+			base_color = SKILL_COLORS.get(key, (70, 120, 200))
+			pygame.draw.rect(self.screen, base_color, btn_rect, border_radius=14)
+			pygame.draw.rect(self.screen, (255, 255, 255), btn_rect, 2, border_radius=14)
+			info = SKILL_INFO.get(key, {})
+			label = self.font_large.render(info.get("title", key.title()), True, (12, 16, 25))
+			self.screen.blit(
+				label,
+				(btn_rect.centerx - label.get_width() // 2, btn_rect.y + 18),
+			)
+			detail = self.font_small.render(info.get("desc", "Passive bonus"), True, (12, 16, 25))
+			self.screen.blit(
+				detail,
+				(btn_rect.centerx - detail.get_width() // 2, btn_rect.y + btn_height - 36),
 			)
 
 	def draw_block_button(self) -> None:
@@ -725,13 +824,18 @@ class SpiralGame:
 			self.draw_machine()
 			self.draw_balls()
 			self.draw_panel(remaining)
+			self.draw_selected_skill_badge()
 			self.draw_footer(remaining)
+			self.draw_skill_overlay()
 
 			pygame.display.flip()
 
 		pygame.quit()
 
 	def handle_click(self, pos: Tuple[int, int]) -> None:
+		if self.current_level >= 3 and self.skill_selection_required:
+			self.handle_skill_selection_click(pos)
+			return
 		if self.handle_skill_selection_click(pos):
 			return
 		if self.pipe_button.collidepoint(pos):
