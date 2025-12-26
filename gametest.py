@@ -28,6 +28,7 @@ LEVEL_CONFIG = {
 	1: {"target": 180, "blocks": False},
 	2: {"target": 300, "blocks": True},
 	3: {"target": 800, "blocks": True},
+	4: {"target": 1200, "blocks": True},
 }
 PIPE_COST_SCHEDULE = [10, 20, 25, 40, 60]
 PIPE_HEIGHT = 180
@@ -46,12 +47,12 @@ SPEED_BOOST_FACTOR = 2.0
 SPEED_BOOST_COOLDOWN = 20.0
 SPECIAL_EGG_VALUE = 10
 SPECIAL_EGG_COLORS = ((255, 250, 160), (255, 110, 150))
-COIN_RAIN_RATE = 8
+COIN_RAIN_RATE = 10
 SKILL_BUTTON_HEIGHT = 56
 SKILL_PANEL_MARGIN = 16
 SKILL_INFO = {
 	"super_egg": {"title": "Lucky Egg", "desc": "Every 5th egg: Super Egg (+10 pts)"},
-	"coin_rain": {"title": "Coin Rain", "desc": "+8 coins/sec"},
+	"coin_rain": {"title": "Coin Rain", "desc": "+10 coins/sec"},
 }
 SKILL_COLORS = {
 	"super_egg": (90, 200, 150),
