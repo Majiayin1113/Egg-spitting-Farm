@@ -61,6 +61,24 @@ SKILL_COLORS = {
 	"rapid_fire": (255, 170, 95),
 }
 
+SHOP_ITEM_DETAILS = {
+	"pipe": {
+		"title": "Vertical Pipe",
+		"desc": "Drop eggs through a short chute to skip ahead on the trail.",
+	},
+	"block": {
+		"title": "Slow Block",
+		"desc": "Place on the path to slow eggs and add bonus score.",
+	},
+	"turbo": {
+		"title": "Turbo Pipe",
+		"desc": "Lay a glowing lane that doubles egg speed along a segment.",
+	},
+}
+TOOLTIP_BG = (26, 32, 48)
+TOOLTIP_BORDER = (255, 255, 255)
+TOOLTIP_TEXT = (230, 240, 255)
+
 RAPID_FIRE_INTERVAL = 0.5
 TURBO_PIPE_COST_SCHEDULE = [25, 45, 60, 80, 110]
 TURBO_PIPE_LENGTH = 0.05  # portion of the track covered
@@ -248,11 +266,13 @@ class SpiralGame:
 		self.speed_boost_active_until = 0
 		self.speed_boost_cooldown_until = 0
 		self.speed_boost_unlocked = False
-		self.skill_choice: Optional[str] = None
+		self.active_skills: set[str] = set()
 		self.skill_selection_required = False
 		self.skill_coin_timer = 0.0
 		self.rapid_fire_timer = 0.0
 		self.skill_modal_buttons: Dict[str, pygame.Rect] = {}
+		self.skill_confirm_button: Optional[pygame.Rect] = None
+		self.shop_tooltip_data: Optional[Dict[str, Optional[str]]] = None
 		self.spawned_ball_count = 0
 		self.level_configs = LEVEL_CONFIG
 		self.max_level = max(self.level_configs.keys()) if self.level_configs else 1
@@ -304,11 +324,12 @@ class SpiralGame:
 		self.speed_boost_unlocked = self.current_level >= ADVANCED_UNLOCK_LEVEL
 		self.speed_boost_active_until = 0
 		self.speed_boost_cooldown_until = 0
-		self.skill_choice = None
+		self.active_skills = set()
 		self.skill_selection_required = self.current_level >= ADVANCED_UNLOCK_LEVEL
 		self.skill_coin_timer = 0.0
 		self.rapid_fire_timer = 0.0
 		self.skill_modal_buttons = {}
+		self.skill_confirm_button = None
 		self.spawned_ball_count = 0
 		if not self.skill_selection_required:
 			self.start_round_clock()
@@ -384,11 +405,15 @@ class SpiralGame:
 	def skill_status_text(self) -> str:
 		if self.current_level < ADVANCED_UNLOCK_LEVEL:
 			return "Passive: Locked"
-		if self.skill_choice:
-			info = SKILL_INFO.get(self.skill_choice, {})
-			return f"Passive: {info.get('title', 'Equipped')}"
+		if self.active_skills:
+			titles = [
+				SKILL_INFO.get(key, {}).get("title", key.title())
+				for key in self.available_skill_keys()
+				if key in self.active_skills
+			]
+			return f"Passive: {', '.join(titles)}"
 		if self.skill_selection_required:
-			return "Passive: Choose a perk"
+			return "Passive: Choose perks"
 		return "Passive: None"
 
 	def handle_skill_selection_click(self, pos: Tuple[int, int]) -> bool:
@@ -400,20 +425,28 @@ class SpiralGame:
 			if key not in allowed:
 				continue
 			if rect.collidepoint(pos):
-				self.select_skill(key)
+				self.toggle_skill(key)
 				return True
+		if self.skill_confirm_button and self.skill_confirm_button.collidepoint(pos):
+			if self.active_skills:
+				self.skill_selection_required = False
+				self.start_round_clock()
+			return True
 		return False
 
-	def select_skill(self, key: str) -> None:
+	def toggle_skill(self, key: str) -> None:
 		if key not in SKILL_INFO:
 			return
-		self.skill_choice = key
-		self.skill_selection_required = False
-		self.start_round_clock()
+		if key not in self.available_skill_keys():
+			return
+		if key in self.active_skills:
+			self.active_skills.remove(key)
+		else:
+			self.active_skills.add(key)
 
 	def spawn_ball(self) -> None:
 		self.spawned_ball_count += 1
-		special = self.skill_choice == "super_egg" and self.spawned_ball_count % 5 == 0
+		special = "super_egg" in self.active_skills and self.spawned_ball_count % 5 == 0
 		value = SPECIAL_EGG_VALUE if special else 1
 		color_index = len(self.balls) % len(BALL_COLORS)
 		self.balls.append(
@@ -552,7 +585,7 @@ class SpiralGame:
 
 	def draw_footer(self, remaining: int) -> None:
 		if self.round_start_ms is None and self.current_level >= ADVANCED_UNLOCK_LEVEL:
-			message = "Select a passive skill to start"
+			message = "Toggle passives, then press Confirm"
 		elif not self.round_active:
 			if self.round_result == "fail":
 				message = "Goal missed. Press Space to retry"
@@ -570,12 +603,13 @@ class SpiralGame:
 		self.screen.blit(text, (x_pos, HEIGHT - 40))
 
 	def draw_shop(self) -> None:
+		self.shop_tooltip_data = None
 		pygame.draw.rect(self.screen, (18, 26, 41), self.shop_rect)
 		pygame.draw.line(self.screen, PANEL_BORDER, (SHOP_WIDTH, 0), (SHOP_WIDTH, HEIGHT), 2)
 		title = self.font_small.render("Shop", True, (255, 255, 255))
 		self.screen.blit(title, (20, 20))
 
-		info = self.font_small.render("Buy gadgets", True, (150, 180, 210))
+		info = self.font_small.render("Hover for details", True, (150, 180, 210))
 		self.screen.blit(info, (20, 50))
 
 		current_cost = self.next_pipe_cost()
@@ -586,37 +620,9 @@ class SpiralGame:
 			btn_color = (45, 60, 90)
 		pygame.draw.rect(self.screen, btn_color, self.pipe_button, border_radius=10)
 		pygame.draw.rect(self.screen, (255, 255, 255), self.pipe_button, 2, border_radius=10)
-		label = "Vertical Pipe"
-		label_text = self.font_small.render(label, True, (12, 16, 25))
-		self.screen.blit(
-			label_text,
-			(
-				self.pipe_button.centerx - label_text.get_width() // 2,
-				self.pipe_button.y + 16,
-			),
-		)
-		cost_text = self.font_small.render(f"Cost: {current_cost}", True, (12, 16, 25))
-		self.screen.blit(
-			cost_text,
-			(
-				self.pipe_button.centerx - cost_text.get_width() // 2,
-				self.pipe_button.y + 46,
-			),
-		)
-		state_msg = "Placing..." if self.placing_pipe else "Click to place"
-		state_text = self.font_small.render(state_msg, True, (12, 16, 25))
-		self.screen.blit(
-			state_text,
-			(
-				self.pipe_button.centerx - state_text.get_width() // 2,
-				self.pipe_button.y + 76,
-			),
-		)
-
-		owned_text = self.font_small.render(
-			f"Owned: {len(self.pipes)}", True, (150, 200, 255)
-		)
-		self.screen.blit(owned_text, (20, self.pipe_button.bottom + 12))
+		self.draw_shop_cost(self.pipe_button, current_cost)
+		self.draw_shop_icon(self.pipe_button, "pipe")
+		self.queue_shop_tooltip("pipe", self.pipe_button)
 
 		if self.blocks_enabled():
 			self.draw_block_button()
@@ -716,13 +722,13 @@ class SpiralGame:
 			)
 			self.screen.blit(locked, (panel.x + 12, panel.y + 70))
 			return
-		awaiting_choice = self.skill_selection_required and self.skill_choice is None
+		awaiting_choice = self.skill_selection_required
 		for key in self.available_skill_keys():
 			rect = self.skill_buttons.get(key)
 			if rect is None:
 				continue
 			info = SKILL_INFO.get(key, {})
-			selected = self.skill_choice == key
+			selected = key in self.active_skills
 			if selected:
 				btn_color = (90, 200, 150)
 				state = "Active"
@@ -751,31 +757,39 @@ class SpiralGame:
 			)
 
 	def draw_selected_skill_badge(self) -> None:
-		if not self.skill_choice or self.skill_selection_required:
+		if not self.active_skills or self.skill_selection_required:
 			return
-		info = SKILL_INFO.get(self.skill_choice, {})
-		badge_width = 200
-		badge_height = 80
+		ordered_keys = [key for key in self.available_skill_keys() if key in self.active_skills]
+		if not ordered_keys:
+			return
+		badge_width = 220
+		badge_height = 40 + len(ordered_keys) * 28
 		margin = 20
 		x_pos = WIDTH - UTILITY_WIDTH - badge_width - margin
 		y_pos = HEIGHT - badge_height - 80
 		rect = pygame.Rect(x_pos, y_pos, badge_width, badge_height)
-		color = SKILL_COLORS.get(self.skill_choice, (90, 120, 200))
+		color = (80, 130, 210)
 		pygame.draw.rect(self.screen, color, rect, border_radius=12)
 		pygame.draw.rect(self.screen, (255, 255, 255), rect, 2, border_radius=12)
-		label = self.font_small.render("Passive Equipped", True, (12, 16, 25))
+		label = self.font_small.render("Passives Equipped", True, (12, 16, 25))
 		self.screen.blit(label, (rect.x + 12, rect.y + 8))
-		title = info.get("title", "Passive")
-		title_text = self.font_large.render(title, True, (12, 16, 25))
-		self.screen.blit(title_text, (rect.x + 12, rect.y + 28))
-		desc_text = self.font_small.render(info.get("desc", ""), True, (12, 16, 25))
-		self.screen.blit(desc_text, (rect.x + 12, rect.y + 56))
+		for idx, key in enumerate(ordered_keys):
+			info = SKILL_INFO.get(key, {})
+			title = info.get("title", key.title())
+			desc = info.get("desc", "")
+			title_text = self.font_small.render(title, True, (12, 16, 25))
+			desc_text = self.font_small.render(desc, True, (240, 240, 250))
+			y_line = rect.y + 32 + idx * 28
+			self.screen.blit(title_text, (rect.x + 12, y_line))
+			self.screen.blit(desc_text, (rect.x + 12, y_line + 14))
 
 	def draw_skill_overlay(self) -> None:
 		if self.current_level < ADVANCED_UNLOCK_LEVEL or not self.skill_selection_required:
 			self.skill_modal_buttons = {}
+			self.skill_confirm_button = None
 			return
 		self.skill_modal_buttons = {}
+		self.skill_confirm_button = None
 		dimmer = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
 		dimmer.fill((0, 0, 0, 170))
 		self.screen.blit(dimmer, (0, 0))
@@ -787,12 +801,12 @@ class SpiralGame:
 		title = self.font_large.render("Select Your Passive", True, (255, 255, 255))
 		self.screen.blit(title, (panel_rect.centerx - title.get_width() // 2, panel_rect.y + 20))
 		sub = self.font_small.render(
-			f"Select a passive before Level {ADVANCED_UNLOCK_LEVEL} begins",
+			f"Toggle any perks before Level {ADVANCED_UNLOCK_LEVEL} begins",
 			True,
 			(180, 220, 255),
 		)
 		self.screen.blit(sub, (panel_rect.centerx - sub.get_width() // 2, panel_rect.y + 64))
-		prompt = self.font_small.render("Click left or right to choose", True, (255, 220, 160))
+		prompt = self.font_small.render("Click skills to toggle, then Confirm", True, (255, 220, 160))
 		self.screen.blit(prompt, (panel_rect.centerx - prompt.get_width() // 2, panel_rect.y + 88))
 		keys = self.available_skill_keys()
 		count = max(1, len(keys))
@@ -803,7 +817,6 @@ class SpiralGame:
 		available_width = panel_w - (cols + 1) * gap
 		btn_width = max(120, available_width // cols)
 		btn_y = panel_rect.y + 130
-		self.skill_modal_buttons = {}
 		for index, key in enumerate(keys):
 			row = index // cols
 			col = index % cols
@@ -812,6 +825,12 @@ class SpiralGame:
 			btn_rect = pygame.Rect(x, y, btn_width, btn_height)
 			self.skill_modal_buttons[key] = btn_rect
 			base_color = SKILL_COLORS.get(key, (70, 120, 200))
+			if key in self.active_skills:
+				base_color = (
+					min(255, base_color[0] + 40),
+					min(255, base_color[1] + 40),
+					min(255, base_color[2] + 40),
+				)
 			pygame.draw.rect(self.screen, base_color, btn_rect, border_radius=14)
 			pygame.draw.rect(self.screen, (255, 255, 255), btn_rect, 2, border_radius=14)
 			info = SKILL_INFO.get(key, {})
@@ -825,6 +844,21 @@ class SpiralGame:
 				detail,
 				(btn_rect.centerx - detail.get_width() // 2, btn_rect.y + btn_height - 36),
 			)
+		confirm_w, confirm_h = 220, 50
+		confirm_rect = pygame.Rect(0, 0, confirm_w, confirm_h)
+		confirm_rect.centerx = panel_rect.centerx
+		confirm_rect.bottom = panel_rect.bottom - 24
+		enabled = bool(self.active_skills)
+		color = (120, 220, 180) if enabled else (70, 80, 100)
+		pygame.draw.rect(self.screen, color, confirm_rect, border_radius=12)
+		pygame.draw.rect(self.screen, (255, 255, 255), confirm_rect, 2, border_radius=12)
+		label = "Confirm & Start" if enabled else "Select a skill"
+		text = self.font_small.render(label, True, (12, 16, 25))
+		self.screen.blit(
+			text,
+			(confirm_rect.centerx - text.get_width() // 2, confirm_rect.centery - text.get_height() // 2),
+		)
+		self.skill_confirm_button = confirm_rect
 
 	def draw_block_button(self) -> None:
 		current_cost = self.next_block_cost()
@@ -835,89 +869,26 @@ class SpiralGame:
 			btn_color = (55, 38, 70)
 		pygame.draw.rect(self.screen, btn_color, self.block_button, border_radius=10)
 		pygame.draw.rect(self.screen, (255, 255, 255), self.block_button, 2, border_radius=10)
-		label_text = self.font_small.render("Slow Block", True, (12, 16, 25))
-		self.screen.blit(
-			label_text,
-			(
-				self.block_button.centerx - label_text.get_width() // 2,
-				self.block_button.y + 16,
-			),
-		)
-		cost_text = self.font_small.render(f"Cost: {current_cost}", True, (12, 16, 25))
-		self.screen.blit(
-			cost_text,
-			(
-				self.block_button.centerx - cost_text.get_width() // 2,
-				self.block_button.y + 46,
-			),
-		)
-		state_msg = "Placing..." if self.placing_block else "Slow +5"
-		state_text = self.font_small.render(state_msg, True, (12, 16, 25))
-		self.screen.blit(
-			state_text,
-			(
-				self.block_button.centerx - state_text.get_width() // 2,
-				self.block_button.y + 76,
-			),
-		)
-		owned_text = self.font_small.render(
-			f"Blocks: {len(self.blocks)}", True, (200, 180, 255)
-		)
-		self.screen.blit(owned_text, (20, self.block_button.bottom + 20))
+		self.draw_shop_cost(self.block_button, current_cost)
+		self.draw_shop_icon(self.block_button, "block")
+		self.queue_shop_tooltip("block", self.block_button)
 
 	def draw_turbo_button(self) -> None:
 		current_cost = self.next_turbo_cost()
 		unlocked = self.turbo_enabled()
 		btn_color = (255, 150, 90)
-		state_msg = "Speed x2"
 		if self.placing_turbo_pipe:
 			btn_color = (220, 220, 120)
-			state_msg = "Placing..."
 		elif not unlocked:
 			btn_color = (55, 38, 20)
-			state_msg = "Unlock Lv3"
 		elif self.coins < current_cost:
 			btn_color = (90, 60, 45)
-			state_msg = "Need coins"
 		pygame.draw.rect(self.screen, btn_color, self.turbo_button, border_radius=10)
 		pygame.draw.rect(self.screen, (255, 255, 255), self.turbo_button, 2, border_radius=10)
-		label_text = self.font_small.render("Turbo Pipe", True, (12, 16, 25))
-		self.screen.blit(
-			label_text,
-			(
-				self.turbo_button.centerx - label_text.get_width() // 2,
-				self.turbo_button.y + 16,
-			),
-		)
-		details = "Medium lane"
-		detail_text = self.font_small.render(details, True, (12, 16, 25))
-		self.screen.blit(
-			detail_text,
-			(
-				self.turbo_button.centerx - detail_text.get_width() // 2,
-				self.turbo_button.y + 40,
-			),
-		)
-		cost_text = self.font_small.render(f"Cost: {current_cost}", True, (12, 16, 25))
-		self.screen.blit(
-			cost_text,
-			(
-				self.turbo_button.centerx - cost_text.get_width() // 2,
-				self.turbo_button.y + 66,
-			),
-		)
-		state_text = self.font_small.render(state_msg, True, (12, 16, 25))
-		self.screen.blit(
-			state_text,
-			(
-				self.turbo_button.centerx - state_text.get_width() // 2,
-				self.turbo_button.y + 92,
-			),
-		)
-		owned_text = self.font_small.render(
-			f"Turbo: {len(self.turbo_pipes)}", True, (255, 200, 160)
-		)
-		self.screen.blit(owned_text, (20, self.turbo_button.bottom + 12))
+		self.draw_shop_cost(self.turbo_button, current_cost)
+		locked_note = None if unlocked else "Unlocks at Level 3"
+		self.draw_shop_icon(self.turbo_button, "turbo")
+		self.queue_shop_tooltip("turbo", self.turbo_button, locked_note=locked_note)
 
 	def draw_blocks(self) -> None:
 		now = pygame.time.get_ticks()
@@ -932,6 +903,104 @@ class SpiralGame:
 			text = self.font_small.render(str(seconds), True, (12, 16, 25))
 			text_rect = text.get_rect(center=rect.center)
 			self.screen.blit(text, text_rect)
+
+	def draw_shop_cost(self, rect: pygame.Rect, cost: int) -> None:
+		label = self.font_small.render(f"Cost: {cost}", True, (240, 240, 250))
+		self.screen.blit(
+			label,
+			(
+				rect.centerx - label.get_width() // 2,
+				rect.y + 16,
+			),
+		)
+
+	def draw_shop_icon(self, rect: pygame.Rect, icon_type: str) -> None:
+		icon_rect = pygame.Rect(0, 0, 40, 40)
+		icon_rect.center = (rect.centerx, rect.bottom - 28)
+		bg = (10, 44, 66)
+		pygame.draw.rect(self.screen, bg, icon_rect, border_radius=10)
+		pygame.draw.rect(self.screen, (255, 255, 255), icon_rect, 2, border_radius=10)
+		inner = icon_rect.inflate(-14, -14)
+		if icon_type == "pipe":
+			pipe_rect = pygame.Rect(0, 0, inner.width // 2, inner.height)
+			pipe_rect.center = inner.center
+			pygame.draw.rect(self.screen, (255, 255, 255), pipe_rect, border_radius=4)
+			cap = pygame.Rect(0, 0, pipe_rect.width + 6, 6)
+			cap.midbottom = pipe_rect.midtop
+			pygame.draw.rect(self.screen, (255, 200, 120), cap, border_radius=3)
+		elif icon_type == "block":
+			square = inner.copy()
+			pygame.draw.rect(self.screen, (255, 140, 90), square, border_radius=6)
+			pygame.draw.rect(self.screen, (255, 255, 255), square, 2, border_radius=6)
+		elif icon_type == "turbo":
+			points = [
+				(inner.left, inner.bottom),
+				(inner.left + inner.width * 0.4, inner.top + inner.height * 0.4),
+				(inner.left + inner.width * 0.7, inner.bottom - inner.height * 0.2),
+				(inner.right, inner.top),
+			]
+			pygame.draw.lines(self.screen, (255, 180, 90), False, points, 4)
+			pygame.draw.circle(self.screen, (255, 180, 90), (int(points[0][0]), int(points[0][1])), 3)
+			pygame.draw.circle(self.screen, (255, 180, 90), (int(points[-1][0]), int(points[-1][1])), 3)
+
+	def queue_shop_tooltip(
+		self,
+		key: str,
+		rect: pygame.Rect,
+		locked_note: Optional[str] = None,
+	) -> None:
+		if (
+			self.current_level >= ADVANCED_UNLOCK_LEVEL
+			and self.skill_selection_required
+		):
+			return
+		mouse_pos = pygame.mouse.get_pos()
+		if not rect.collidepoint(mouse_pos):
+			return
+		info = SHOP_ITEM_DETAILS.get(key)
+		if not info:
+			return
+		self.shop_tooltip_data = {
+			"title": info.get("title", key.title()),
+			"desc": info.get("desc", ""),
+			"note": locked_note,
+		}
+
+	def draw_shop_tooltip(self) -> None:
+		if not self.shop_tooltip_data:
+			return
+		mouse_x, mouse_y = pygame.mouse.get_pos()
+		lines = [self.shop_tooltip_data.get("title", "")]
+		desc = self.shop_tooltip_data.get("desc") or ""
+		for segment in desc.split("\n"):
+			if segment:
+				lines.append(segment)
+		note = self.shop_tooltip_data.get("note")
+		if note:
+			lines.append(note)
+		padding = 10
+		surfaces: List[Tuple[pygame.Surface, pygame.Rect]] = []
+		max_width = 0
+		for idx, text in enumerate(lines):
+			if not text:
+				text = " "
+			surf = self.font_small.render(text, True, TOOLTIP_TEXT)
+			rect = surf.get_rect()
+			rect.topleft = (0, idx * (self.font_small.get_height() + 2))
+			surfaces.append((surf, rect))
+			max_width = max(max_width, rect.width)
+		height = surfaces[-1][1].bottom if surfaces else 0
+		tooltip_rect = pygame.Rect(0, 0, max_width + padding * 2, height + padding * 2)
+		tooltip_rect.topleft = (mouse_x + 24, mouse_y + 24)
+		if tooltip_rect.right > WIDTH - 10:
+			tooltip_rect.right = mouse_x - 24
+		if tooltip_rect.bottom > HEIGHT - 10:
+			tooltip_rect.bottom = HEIGHT - 10
+		pygame.draw.rect(self.screen, TOOLTIP_BG, tooltip_rect, border_radius=10)
+		pygame.draw.rect(self.screen, TOOLTIP_BORDER, tooltip_rect, 2, border_radius=10)
+		for surf, rect in surfaces:
+			rect.topleft = (tooltip_rect.x + padding, tooltip_rect.y + padding + rect.y)
+			self.screen.blit(surf, rect)
 
 	def draw_turbo_pipes(self) -> None:
 		if not self.turbo_pipes:
@@ -982,6 +1051,7 @@ class SpiralGame:
 			self.draw_selected_skill_badge()
 			self.draw_footer(remaining)
 			self.draw_skill_overlay()
+			self.draw_shop_tooltip()
 
 			pygame.display.flip()
 
@@ -1227,7 +1297,7 @@ class SpiralGame:
 		]
 
 	def apply_skill_income(self, dt: float) -> None:
-		if self.skill_choice != "coin_rain" or not self.round_active:
+		if "coin_rain" not in self.active_skills or not self.round_active:
 			return
 		self.skill_coin_timer += dt
 		while self.skill_coin_timer >= 1.0:
@@ -1235,7 +1305,7 @@ class SpiralGame:
 			self.skill_coin_timer -= 1.0
 
 	def apply_rapid_fire(self, dt: float) -> None:
-		if self.skill_choice != "rapid_fire" or not self.round_active:
+		if "rapid_fire" not in self.active_skills or not self.round_active:
 			return
 		if self.round_start_ms is None:
 			return
