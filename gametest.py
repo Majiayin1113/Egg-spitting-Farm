@@ -53,11 +53,21 @@ SKILL_PANEL_MARGIN = 16
 SKILL_INFO = {
 	"super_egg": {"title": "Lucky Egg", "desc": "Every 5th egg: Super Egg (+10 pts)"},
 	"coin_rain": {"title": "Coin Rain", "desc": "+10 coins/sec"},
+	"rapid_fire": {"title": "Rapid Nest", "desc": "Extra egg every 0.5s"},
 }
 SKILL_COLORS = {
 	"super_egg": (90, 200, 150),
 	"coin_rain": (90, 140, 220),
+	"rapid_fire": (255, 170, 95),
 }
+
+RAPID_FIRE_INTERVAL = 0.5
+TURBO_PIPE_COST_SCHEDULE = [25, 45, 60, 80, 110]
+TURBO_PIPE_LENGTH = 0.05  # portion of the track covered
+TURBO_PIPE_MULTIPLIER = 2.0
+TURBO_PIPE_COLOR = (255, 120, 40)
+
+ADVANCED_UNLOCK_LEVEL = 2  # Level where passives and boosts become available
 
 
 def build_z_path(
@@ -138,6 +148,7 @@ class Ball:
 	pipe_id: Optional[int] = None
 	used_pipes: set[int] = field(default_factory=set)
 	block_hits: set[int] = field(default_factory=set)
+	turbo_hits: set[int] = field(default_factory=set)
 	bonus_score: int = 0
 	score_value: int = 1
 	is_special: bool = False
@@ -165,6 +176,16 @@ class BlockItem:
 	spawn_ms: int = 0
 
 
+@dataclass
+class TurboPipeItem:
+	id: int = 0
+	cost: int = 0
+	start_progress: float = 0.0
+	end_progress: float = 0.0
+	length_progress: float = TURBO_PIPE_LENGTH
+	positions: List[Tuple[float, float]] = field(default_factory=list)
+
+
 
 class SpiralGame:
 	def __init__(self, start_level: int = 1) -> None:
@@ -183,6 +204,7 @@ class SpiralGame:
 		self.shop_rect = pygame.Rect(0, 0, SHOP_WIDTH, HEIGHT)
 		self.pipe_button = pygame.Rect(20, 180, SHOP_WIDTH - 40, 140)
 		self.block_button = pygame.Rect(20, 360, SHOP_WIDTH - 40, 140)
+		self.turbo_button = pygame.Rect(20, 540, SHOP_WIDTH - 40, 140)
 		self.utility_rect = pygame.Rect(WIDTH - UTILITY_WIDTH, 0, UTILITY_WIDTH, HEIGHT)
 		self.speed_boost_button = pygame.Rect(
 			self.utility_rect.x + 20,
@@ -190,7 +212,7 @@ class SpiralGame:
 			self.utility_rect.width - 40,
 			140,
 		)
-		skill_panel_height = 230
+		skill_panel_height = 320
 		self.skill_panel_rect = pygame.Rect(
 			self.utility_rect.x + 10,
 			self.utility_rect.bottom - skill_panel_height - 20,
@@ -200,27 +222,36 @@ class SpiralGame:
 		btn_width = self.skill_panel_rect.width - 2 * SKILL_PANEL_MARGIN
 		btn_x = self.skill_panel_rect.x + SKILL_PANEL_MARGIN
 		btn_y = self.skill_panel_rect.y + 80
+		skill_spacing = SKILL_BUTTON_HEIGHT + 10
 		self.skill_buttons = {
 			"super_egg": pygame.Rect(btn_x, btn_y, btn_width, SKILL_BUTTON_HEIGHT),
-			"coin_rain": pygame.Rect(
+			"coin_rain": pygame.Rect(btn_x, btn_y + skill_spacing, btn_width, SKILL_BUTTON_HEIGHT),
+			"rapid_fire": pygame.Rect(
 				btn_x,
-				btn_y + SKILL_BUTTON_HEIGHT + 10,
+				btn_y + 2 * skill_spacing,
 				btn_width,
 				SKILL_BUTTON_HEIGHT,
 			),
 		}
 		self.pipe_counter = 0
+		self.pipe_purchases = 0
 		self.block_counter = 0
+		self.block_purchases = 0
 		self.pipes: List[PipeItem] = []
 		self.blocks: List[BlockItem] = []
+		self.turbo_counter = 0
+		self.turbo_purchases = 0
+		self.turbo_pipes: List[TurboPipeItem] = []
 		self.placing_pipe: Optional[PipeItem] = None
 		self.placing_block: Optional[BlockItem] = None
+		self.placing_turbo_pipe: Optional[TurboPipeItem] = None
 		self.speed_boost_active_until = 0
 		self.speed_boost_cooldown_until = 0
 		self.speed_boost_unlocked = False
 		self.skill_choice: Optional[str] = None
 		self.skill_selection_required = False
 		self.skill_coin_timer = 0.0
+		self.rapid_fire_timer = 0.0
 		self.skill_modal_buttons: Dict[str, pygame.Rect] = {}
 		self.spawned_ball_count = 0
 		self.level_configs = LEVEL_CONFIG
@@ -228,9 +259,29 @@ class SpiralGame:
 		self.current_level = max(1, min(start_level, self.max_level))
 		self.reset_round()
 
-	def reset_round(self, level: Optional[int] = None) -> None:
+	def reset_round(self, level: Optional[int] = None, carry_items: bool = False) -> None:
 		if level is not None:
 			self.current_level = max(1, min(level, self.max_level))
+		if carry_items:
+			preserved_pipes = self.clone_pipes()
+			preserved_blocks = self.clone_blocks()
+			preserved_turbos = self.clone_turbo_pipes()
+			pipe_counter = self.pipe_counter
+			block_counter = self.block_counter
+			turbo_counter = self.turbo_counter
+			pipe_purchases = getattr(self, "pipe_purchases", 0)
+			block_purchases = getattr(self, "block_purchases", 0)
+			turbo_purchases = getattr(self, "turbo_purchases", 0)
+		else:
+			preserved_pipes = []
+			preserved_blocks = []
+			preserved_turbos = []
+			pipe_counter = 0
+			block_counter = 0
+			turbo_counter = 0
+			pipe_purchases = 0
+			block_purchases = 0
+			turbo_purchases = 0
 		self.balls: List[Ball] = []
 		self.score = 0
 		self.coins = 0
@@ -238,20 +289,25 @@ class SpiralGame:
 		self.round_start_ms: Optional[int] = None
 		self.round_active = True
 		self.round_result: Optional[str] = None
-		self.pipes = []
+		self.pipes = preserved_pipes
 		self.placing_pipe = None
-		self.pipe_counter = 0
-		self.pipe_purchases = 0
-		self.blocks = []
-		self.block_counter = 0
-		self.block_purchases = 0
+		self.pipe_counter = pipe_counter
+		self.pipe_purchases = pipe_purchases
+		self.blocks = preserved_blocks
+		self.block_counter = block_counter
+		self.block_purchases = block_purchases
 		self.placing_block = None
-		self.speed_boost_unlocked = self.current_level >= 3
+		self.turbo_pipes = preserved_turbos
+		self.turbo_counter = turbo_counter
+		self.turbo_purchases = turbo_purchases
+		self.placing_turbo_pipe = None
+		self.speed_boost_unlocked = self.current_level >= ADVANCED_UNLOCK_LEVEL
 		self.speed_boost_active_until = 0
 		self.speed_boost_cooldown_until = 0
 		self.skill_choice = None
-		self.skill_selection_required = self.current_level >= 3
+		self.skill_selection_required = self.current_level >= ADVANCED_UNLOCK_LEVEL
 		self.skill_coin_timer = 0.0
+		self.rapid_fire_timer = 0.0
 		self.skill_modal_buttons = {}
 		self.spawned_ball_count = 0
 		if not self.skill_selection_required:
@@ -269,6 +325,10 @@ class SpiralGame:
 		idx = min(self.block_purchases, len(BLOCK_COST_SCHEDULE) - 1)
 		return BLOCK_COST_SCHEDULE[idx]
 
+	def next_turbo_cost(self) -> int:
+		idx = min(self.turbo_purchases, len(TURBO_PIPE_COST_SCHEDULE) - 1)
+		return TURBO_PIPE_COST_SCHEDULE[idx]
+
 	def level_target(self) -> int:
 		cfg = self.level_configs.get(self.current_level, {})
 		return cfg.get("target", 0)
@@ -277,6 +337,9 @@ class SpiralGame:
 		cfg = self.level_configs.get(self.current_level, {})
 		return cfg.get("blocks", False)
 
+	def turbo_enabled(self) -> bool:
+		return self.current_level >= 3
+
 	def speed_boost_active(self) -> bool:
 		if not self.speed_boost_unlocked:
 			return False
@@ -284,6 +347,12 @@ class SpiralGame:
 
 	def speed_boost_multiplier(self) -> float:
 		return SPEED_BOOST_FACTOR if self.speed_boost_active() else 1.0
+
+	def available_skill_keys(self) -> List[str]:
+		keys = ["super_egg", "coin_rain"]
+		if self.current_level >= 3:
+			keys.append("rapid_fire")
+		return keys
 
 	def speed_boost_cooldown_remaining(self) -> float:
 		if not self.speed_boost_unlocked:
@@ -313,7 +382,7 @@ class SpiralGame:
 		)
 
 	def skill_status_text(self) -> str:
-		if self.current_level < 3:
+		if self.current_level < ADVANCED_UNLOCK_LEVEL:
 			return "Passive: Locked"
 		if self.skill_choice:
 			info = SKILL_INFO.get(self.skill_choice, {})
@@ -323,10 +392,13 @@ class SpiralGame:
 		return "Passive: None"
 
 	def handle_skill_selection_click(self, pos: Tuple[int, int]) -> bool:
-		if self.current_level < 3 or not self.skill_selection_required:
+		if self.current_level < ADVANCED_UNLOCK_LEVEL or not self.skill_selection_required:
 			return False
 		buttons = self.skill_modal_buttons or self.skill_buttons
+		allowed = set(self.available_skill_keys())
 		for key, rect in buttons.items():
+			if key not in allowed:
+				continue
 			if rect.collidepoint(pos):
 				self.select_skill(key)
 				return True
@@ -362,6 +434,7 @@ class SpiralGame:
 			ball.speed = min(ball.speed + BALL_ACCEL * multiplier * dt, BALL_MAX_SPEED)
 			ball.distance += (ball.speed * multiplier) * dt
 			if not ball.in_pipe:
+				self.apply_turbo_effects(ball, dt, multiplier)
 				self.apply_block_effects(ball)
 			if self.apply_pipe(ball, dt):
 				continue
@@ -397,12 +470,14 @@ class SpiralGame:
 		self.update_balls(dt)
 		self.update_blocks()
 		self.apply_skill_income(dt)
+		self.apply_rapid_fire(dt)
 
 	def draw_track(self) -> None:
 		pygame.draw.lines(self.screen, TRACK_COLOR, False, self.track_points, 4)
 		for pipe in self.pipes:
 			if pipe.rect:
 				pygame.draw.rect(self.screen, (255, 255, 255), pipe.rect, border_radius=6)
+		self.draw_turbo_pipes()
 		self.draw_blocks()
 
 	def draw_machine(self) -> None:
@@ -456,7 +531,7 @@ class SpiralGame:
 		self.screen.blit(goal_text, (rect.x + 16, rect.y + 122))
 
 		status_y = rect.y + 148
-		if self.current_level >= 3:
+		if self.current_level >= ADVANCED_UNLOCK_LEVEL:
 			skill_text = self.font_small.render(self.skill_status_text(), True, (160, 255, 200))
 			self.screen.blit(skill_text, (rect.x + 16, status_y))
 			status_y += 28
@@ -476,7 +551,7 @@ class SpiralGame:
 				self.screen.blit(win_text, (rect.x + 16, status_y))
 
 	def draw_footer(self, remaining: int) -> None:
-		if self.round_start_ms is None and self.current_level >= 3:
+		if self.round_start_ms is None and self.current_level >= ADVANCED_UNLOCK_LEVEL:
 			message = "Select a passive skill to start"
 		elif not self.round_active:
 			if self.round_result == "fail":
@@ -546,6 +621,8 @@ class SpiralGame:
 		if self.blocks_enabled():
 			self.draw_block_button()
 
+		self.draw_turbo_button()
+
 	def draw_power_bar(self) -> None:
 		pygame.draw.rect(self.screen, (18, 26, 41), self.utility_rect)
 		pygame.draw.line(
@@ -566,7 +643,7 @@ class SpiralGame:
 		cooldown_remaining = self.speed_boost_cooldown_remaining()
 		if locked:
 			btn_color = (45, 60, 90)
-			state_msg = "Unlock Lv3"
+			state_msg = f"Unlock Lv{ADVANCED_UNLOCK_LEVEL}"
 		elif self.speed_boost_active():
 			btn_color = (220, 200, 90)
 			state_msg = "Active"
@@ -630,15 +707,20 @@ class SpiralGame:
 		pygame.draw.rect(self.screen, PANEL_BORDER, panel, 2, border_radius=12)
 		title = self.font_small.render("Passive Skills", True, (255, 255, 255))
 		self.screen.blit(title, (panel.x + 12, panel.y + 10))
-		desc = self.font_small.render("Select before Lv3", True, (150, 180, 210))
+		unlock_short = f"Lv{ADVANCED_UNLOCK_LEVEL}"
+		desc = self.font_small.render(f"Select before {unlock_short}", True, (150, 180, 210))
 		self.screen.blit(desc, (panel.x + 12, panel.y + 34))
-		if self.current_level < 3:
-			locked = self.font_small.render("Unlocks at Level 3", True, (255, 180, 120))
+		if self.current_level < ADVANCED_UNLOCK_LEVEL:
+			locked = self.font_small.render(
+				f"Unlocks at Level {ADVANCED_UNLOCK_LEVEL}", True, (255, 180, 120)
+			)
 			self.screen.blit(locked, (panel.x + 12, panel.y + 70))
 			return
 		awaiting_choice = self.skill_selection_required and self.skill_choice is None
-		for key in ("super_egg", "coin_rain"):
-			rect = self.skill_buttons[key]
+		for key in self.available_skill_keys():
+			rect = self.skill_buttons.get(key)
+			if rect is None:
+				continue
 			info = SKILL_INFO.get(key, {})
 			selected = self.skill_choice == key
 			if selected:
@@ -690,30 +772,44 @@ class SpiralGame:
 		self.screen.blit(desc_text, (rect.x + 12, rect.y + 56))
 
 	def draw_skill_overlay(self) -> None:
-		if self.current_level < 3 or not self.skill_selection_required:
+		if self.current_level < ADVANCED_UNLOCK_LEVEL or not self.skill_selection_required:
 			self.skill_modal_buttons = {}
 			return
 		self.skill_modal_buttons = {}
 		dimmer = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
 		dimmer.fill((0, 0, 0, 170))
 		self.screen.blit(dimmer, (0, 0))
-		panel_w, panel_h = 560, 300
+		panel_w, panel_h = 560, 420
 		panel_rect = pygame.Rect(0, 0, panel_w, panel_h)
 		panel_rect.center = (WIDTH // 2, HEIGHT // 2 - 20)
 		pygame.draw.rect(self.screen, PANEL_COLOR, panel_rect, border_radius=16)
 		pygame.draw.rect(self.screen, PANEL_BORDER, panel_rect, 2, border_radius=16)
 		title = self.font_large.render("Select Your Passive", True, (255, 255, 255))
 		self.screen.blit(title, (panel_rect.centerx - title.get_width() // 2, panel_rect.y + 20))
-		sub = self.font_small.render("Select a passive before Level 3 begins", True, (180, 220, 255))
+		sub = self.font_small.render(
+			f"Select a passive before Level {ADVANCED_UNLOCK_LEVEL} begins",
+			True,
+			(180, 220, 255),
+		)
 		self.screen.blit(sub, (panel_rect.centerx - sub.get_width() // 2, panel_rect.y + 64))
 		prompt = self.font_small.render("Click left or right to choose", True, (255, 220, 160))
 		self.screen.blit(prompt, (panel_rect.centerx - prompt.get_width() // 2, panel_rect.y + 88))
-		btn_width = (panel_w - 3 * 50) // 2
+		keys = self.available_skill_keys()
+		count = max(1, len(keys))
 		btn_height = 140
+		cols = min(3, count)
+		rows = math.ceil(count / cols)
+		gap = 40
+		available_width = panel_w - (cols + 1) * gap
+		btn_width = max(120, available_width // cols)
 		btn_y = panel_rect.y + 130
-		for idx, key in enumerate(("super_egg", "coin_rain")):
-			btn_x = panel_rect.x + 50 + idx * (btn_width + 50)
-			btn_rect = pygame.Rect(btn_x, btn_y, btn_width, btn_height)
+		self.skill_modal_buttons = {}
+		for index, key in enumerate(keys):
+			row = index // cols
+			col = index % cols
+			x = panel_rect.x + gap + col * (btn_width + gap)
+			y = btn_y + row * (btn_height + 30)
+			btn_rect = pygame.Rect(x, y, btn_width, btn_height)
 			self.skill_modal_buttons[key] = btn_rect
 			base_color = SKILL_COLORS.get(key, (70, 120, 200))
 			pygame.draw.rect(self.screen, base_color, btn_rect, border_radius=14)
@@ -769,6 +865,60 @@ class SpiralGame:
 		)
 		self.screen.blit(owned_text, (20, self.block_button.bottom + 20))
 
+	def draw_turbo_button(self) -> None:
+		current_cost = self.next_turbo_cost()
+		unlocked = self.turbo_enabled()
+		btn_color = (255, 150, 90)
+		state_msg = "Speed x2"
+		if self.placing_turbo_pipe:
+			btn_color = (220, 220, 120)
+			state_msg = "Placing..."
+		elif not unlocked:
+			btn_color = (55, 38, 20)
+			state_msg = "Unlock Lv3"
+		elif self.coins < current_cost:
+			btn_color = (90, 60, 45)
+			state_msg = "Need coins"
+		pygame.draw.rect(self.screen, btn_color, self.turbo_button, border_radius=10)
+		pygame.draw.rect(self.screen, (255, 255, 255), self.turbo_button, 2, border_radius=10)
+		label_text = self.font_small.render("Turbo Pipe", True, (12, 16, 25))
+		self.screen.blit(
+			label_text,
+			(
+				self.turbo_button.centerx - label_text.get_width() // 2,
+				self.turbo_button.y + 16,
+			),
+		)
+		details = "Medium lane"
+		detail_text = self.font_small.render(details, True, (12, 16, 25))
+		self.screen.blit(
+			detail_text,
+			(
+				self.turbo_button.centerx - detail_text.get_width() // 2,
+				self.turbo_button.y + 40,
+			),
+		)
+		cost_text = self.font_small.render(f"Cost: {current_cost}", True, (12, 16, 25))
+		self.screen.blit(
+			cost_text,
+			(
+				self.turbo_button.centerx - cost_text.get_width() // 2,
+				self.turbo_button.y + 66,
+			),
+		)
+		state_text = self.font_small.render(state_msg, True, (12, 16, 25))
+		self.screen.blit(
+			state_text,
+			(
+				self.turbo_button.centerx - state_text.get_width() // 2,
+				self.turbo_button.y + 92,
+			),
+		)
+		owned_text = self.font_small.render(
+			f"Turbo: {len(self.turbo_pipes)}", True, (255, 200, 160)
+		)
+		self.screen.blit(owned_text, (20, self.turbo_button.bottom + 12))
+
 	def draw_blocks(self) -> None:
 		now = pygame.time.get_ticks()
 		for block in self.blocks:
@@ -782,6 +932,20 @@ class SpiralGame:
 			text = self.font_small.render(str(seconds), True, (12, 16, 25))
 			text_rect = text.get_rect(center=rect.center)
 			self.screen.blit(text, text_rect)
+
+	def draw_turbo_pipes(self) -> None:
+		if not self.turbo_pipes:
+			return
+		for turbo in self.turbo_pipes:
+			if not turbo.positions:
+				turbo.positions = self.build_turbo_positions(turbo.start_progress, turbo.end_progress)
+			if len(turbo.positions) < 2:
+				continue
+			pygame.draw.lines(self.screen, TURBO_PIPE_COLOR, False, turbo.positions, 8)
+			start_x, start_y = turbo.positions[0]
+			end_x, end_y = turbo.positions[-1]
+			pygame.draw.circle(self.screen, TURBO_PIPE_COLOR, (int(start_x), int(start_y)), 6)
+			pygame.draw.circle(self.screen, TURBO_PIPE_COLOR, (int(end_x), int(end_y)), 6)
 
 	def run(self) -> None:
 		running = True
@@ -798,7 +962,8 @@ class SpiralGame:
 							self.reset_round(self.current_level)
 						elif event.key == pygame.K_RETURN and self.round_result == "success":
 							next_level = self.current_level + 1 if self.current_level < self.max_level else 1
-							self.reset_round(next_level)
+							carry_layout = next_level > self.current_level
+							self.reset_round(next_level, carry_items=carry_layout)
 						elif event.key == pygame.K_r:
 							self.reset_round(1)
 				elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -823,7 +988,7 @@ class SpiralGame:
 		pygame.quit()
 
 	def handle_click(self, pos: Tuple[int, int]) -> None:
-		if self.current_level >= 3 and self.skill_selection_required:
+		if self.current_level >= ADVANCED_UNLOCK_LEVEL and self.skill_selection_required:
 			self.handle_skill_selection_click(pos)
 			return
 		if self.handle_skill_selection_click(pos):
@@ -834,6 +999,9 @@ class SpiralGame:
 		if self.blocks_enabled() and self.block_button.collidepoint(pos):
 			self.try_purchase_block()
 			return
+		if self.turbo_button.collidepoint(pos):
+			self.try_purchase_turbo_pipe()
+			return
 		if self.speed_boost_button.collidepoint(pos):
 			self.try_activate_speed_boost()
 			return
@@ -843,6 +1011,8 @@ class SpiralGame:
 			self.place_pipe(pos)
 		elif self.placing_block and play_min < pos[0] < play_max:
 			self.place_block(pos)
+		elif self.placing_turbo_pipe and play_min < pos[0] < play_max:
+			self.place_turbo_pipe(pos)
 
 	def try_purchase_pipe(self) -> None:
 		if self.placing_pipe or self.placing_block:
@@ -867,6 +1037,19 @@ class SpiralGame:
 		self.block_counter += 1
 		self.block_purchases += 1
 		self.placing_block = BlockItem(id=self.block_counter, cost=cost)
+
+	def try_purchase_turbo_pipe(self) -> None:
+		if not self.turbo_enabled():
+			return
+		if self.placing_turbo_pipe or self.placing_pipe or self.placing_block:
+			return
+		cost = self.next_turbo_cost()
+		if self.coins < cost:
+			return
+		self.coins -= cost
+		self.turbo_counter += 1
+		self.turbo_purchases += 1
+		self.placing_turbo_pipe = TurboPipeItem(id=self.turbo_counter, cost=cost)
 
 	def place_pipe(self, pos: Tuple[int, int]) -> None:
 		if not self.placing_pipe:
@@ -913,6 +1096,25 @@ class SpiralGame:
 		block.spawn_ms = pygame.time.get_ticks()
 		self.blocks.append(block)
 		self.placing_block = None
+
+	def place_turbo_pipe(self, pos: Tuple[int, int]) -> None:
+		if not self.placing_turbo_pipe:
+			return
+		_, _, progress = self.nearest_point_on_track(pos)
+		length = self.placing_turbo_pipe.length_progress
+		start_prog = max(0.0, progress - length / 2)
+		end_prog = min(1.0, progress + length / 2)
+		if end_prog - start_prog < length:
+			missing = length - (end_prog - start_prog)
+			start_prog = max(0.0, start_prog - missing / 2)
+			end_prog = min(1.0, end_prog + missing / 2)
+		turbo = self.placing_turbo_pipe
+		turbo.start_progress = start_prog
+		turbo.end_progress = end_prog
+		turbo.positions = self.build_turbo_positions(start_prog, end_prog)
+		self.turbo_pipes.append(turbo)
+		self.turbo_pipes.sort(key=lambda item: item.start_progress)
+		self.placing_turbo_pipe = None
 
 	def ball_progress(self, ball: Ball) -> float:
 		if self.track_total <= 0:
@@ -1004,6 +1206,18 @@ class SpiralGame:
 				best_progress = path_dist / self.track_total if self.track_total else 0.0
 		return best_point[0], best_point[1], best_progress
 
+	def build_turbo_positions(self, start_progress: float, end_progress: float, samples: int = 16) -> List[Tuple[float, float]]:
+		if end_progress <= start_progress:
+			return []
+		positions: List[Tuple[float, float]] = []
+		for idx in range(samples + 1):
+			ratio = idx / samples
+			prog = start_progress + (end_progress - start_progress) * ratio
+			positions.append(
+				lerp_point(self.track_points, self.track_lengths, self.track_total, prog)
+			)
+		return positions
+
 	def update_blocks(self) -> None:
 		if not self.blocks:
 			return
@@ -1019,6 +1233,16 @@ class SpiralGame:
 		while self.skill_coin_timer >= 1.0:
 			self.coins += COIN_RAIN_RATE
 			self.skill_coin_timer -= 1.0
+
+	def apply_rapid_fire(self, dt: float) -> None:
+		if self.skill_choice != "rapid_fire" or not self.round_active:
+			return
+		if self.round_start_ms is None:
+			return
+		self.rapid_fire_timer += dt
+		while self.rapid_fire_timer >= RAPID_FIRE_INTERVAL:
+			self.spawn_ball()
+			self.rapid_fire_timer -= RAPID_FIRE_INTERVAL
 
 	def apply_pipe(self, ball: Ball, dt: float) -> bool:
 		if not self.pipes:
@@ -1068,6 +1292,79 @@ class SpiralGame:
 				ball.speed = max(ball.speed * BLOCK_SLOW_FACTOR, 0.0)
 				ball.block_hits.add(block.id)
 				ball.bonus_score += BLOCK_BONUS
+
+	def apply_turbo_effects(self, ball: Ball, dt: float, speed_multiplier: float) -> None:
+		if not self.turbo_pipes:
+			return
+		zone_multiplier = 1.0
+		for turbo in self.turbo_pipes:
+			start_distance = self.progress_to_distance(turbo.start_progress)
+			end_distance = self.progress_to_distance(turbo.end_progress)
+			if ball.last_distance < end_distance and ball.distance > start_distance:
+				zone_multiplier = max(zone_multiplier, TURBO_PIPE_MULTIPLIER)
+				if turbo.id not in ball.turbo_hits and ball.last_distance <= start_distance:
+					ball.speed = min(
+						ball.speed * TURBO_PIPE_MULTIPLIER,
+						BALL_MAX_SPEED * TURBO_PIPE_MULTIPLIER,
+					)
+					ball.turbo_hits.add(turbo.id)
+		if zone_multiplier > 1.0:
+			extra = (ball.speed * speed_multiplier) * dt * (zone_multiplier - 1.0)
+			ball.distance += extra
+		else:
+			ball.speed = min(ball.speed, BALL_MAX_SPEED)
+
+	def clone_pipes(self) -> List[PipeItem]:
+		"""Make deep copies of all placed pipes so layouts can persist."""
+		clones: List[PipeItem] = []
+		for pipe in self.pipes:
+			rect_copy = pipe.rect.copy() if pipe.rect else None
+			clones.append(
+				PipeItem(
+					id=pipe.id,
+					cost=pipe.cost,
+					rect=rect_copy,
+					entry_progress=pipe.entry_progress,
+					exit_progress=pipe.exit_progress,
+					entry_y=pipe.entry_y,
+					exit_y=pipe.exit_y,
+					x=pipe.x,
+				)
+			)
+		return clones
+
+	def clone_blocks(self) -> List[BlockItem]:
+		"""Carry block placements forward with refreshed timers."""
+		clones: List[BlockItem] = []
+		now = pygame.time.get_ticks()
+		for block in self.blocks:
+			clones.append(
+				BlockItem(
+					id=block.id,
+					cost=block.cost,
+					progress=block.progress,
+					pos=block.pos,
+					radius=block.radius,
+					spawn_ms=now,
+				)
+			)
+		return clones
+
+	def clone_turbo_pipes(self) -> List[TurboPipeItem]:
+		"""Duplicate turbo pipes so layouts persist without shared references."""
+		clones: List[TurboPipeItem] = []
+		for turbo in self.turbo_pipes:
+			clones.append(
+				TurboPipeItem(
+					id=turbo.id,
+					cost=turbo.cost,
+					start_progress=turbo.start_progress,
+					end_progress=turbo.end_progress,
+					length_progress=turbo.length_progress,
+					positions=list(turbo.positions),
+				)
+			)
+		return clones
 
 	def get_pipe_by_id(self, pipe_id: Optional[int]) -> Optional[PipeItem]:
 		if pipe_id is None:
