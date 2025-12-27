@@ -109,9 +109,10 @@ BOUNCER_NEIGHBOR_DISTANCE = 140.0
 BOUNCER_TRIGGER_SCORE = 5
 
 STORM_ITEM_COST = 80
-STORM_PASS_INTERVAL = 20
-STORM_MIN_EGGS = 30
-STORM_MAX_EGGS = 100
+STORM_MIN_EGGS = 80
+STORM_MAX_EGGS = 500
+STORM_WINDOW_DURATION = 5000  # milliseconds
+STORM_WINDOW_TARGET = 20
 STORM_ANIMATION_DURATION = 900  # milliseconds
 STORM_RADIUS = 42
 STORM_LIFETIME_MS = 10_000
@@ -276,9 +277,11 @@ class StormItem:
 	center: Tuple[int, int] = (0, 0)
 	progress: float = 0.0
 	radius: int = STORM_RADIUS
-	pass_count: int = 0
+	window_count: int = 0
+	counted_eggs: int = 0
 	animation_until: int = 0
 	last_reward: int = 0
+	settle_at: int = 0
 	expires_at: int = 0
 
 
@@ -626,9 +629,14 @@ class SpiralGame:
 		if not self.storm_emitters:
 			return
 		now = pygame.time.get_ticks()
-		self.storm_emitters = [
-			storm for storm in self.storm_emitters if storm.expires_at == 0 or now < storm.expires_at
-		]
+		active: List[StormItem] = []
+		for storm in self.storm_emitters:
+			if storm.settle_at and now >= storm.settle_at and storm.last_reward == 0:
+				self.trigger_storm(storm)
+			if storm.expires_at and storm.expires_at <= now:
+				continue
+			active.append(storm)
+		self.storm_emitters = active
 
 	def collect_powerup(self, powerup: TrackPowerup) -> None:
 		if powerup.kind == "speed_boost":
@@ -1050,7 +1058,7 @@ class SpiralGame:
 	def draw_storm_button(self) -> None:
 		charges = max(0, self.storm_charges)
 		btn_color = (150, 90, 200)
-		status = "One-time blast"
+		status = "Counts 5s window"
 		if self.placing_storm:
 			btn_color = (220, 210, 140)
 			status = "Click track to place"
@@ -1065,7 +1073,7 @@ class SpiralGame:
 				self.storm_button.y + 8,
 			),
 		)
-		detail = self.font_small.render("Burst 30-100 pts", True, (12, 16, 25))
+		detail = self.font_small.render("Earn 80-500 pts", True, (12, 16, 25))
 		self.screen.blit(
 			detail,
 			(
@@ -1554,8 +1562,18 @@ class SpiralGame:
 			pygame.draw.circle(self.screen, (120, 80, 180), (cx, cy), radius, width=3)
 			pygame.draw.circle(self.screen, (220, 200, 255), (cx, cy), max(6, radius - 10), width=2)
 			pygame.draw.circle(self.screen, (255, 255, 255), (cx, cy), 4)
+			if emitter.settle_at and now < emitter.settle_at:
+				remain = max(0.0, (emitter.settle_at - now) / 1000.0)
+				status_text = self.font_small.render(f"{remain:0.1f}s", True, (230, 220, 255))
+				status_rect = status_text.get_rect(center=(cx, cy - radius - 18))
+				self.screen.blit(status_text, status_rect)
+				count_text = self.font_small.render(f"Eggs {emitter.window_count}", True, (200, 190, 230))
+				count_rect = count_text.get_rect(center=(cx, cy + radius + 12))
+				self.screen.blit(count_text, count_rect)
 			if emitter.animation_until > now:
-				phase = 1.0 - (emitter.animation_until - now) / STORM_ANIMATION_DURATION
+				remaining = max(0, emitter.animation_until - now)
+				elapsed = STORM_ANIMATION_DURATION - remaining
+				phase = max(0.0, min(1.0, elapsed / max(1, STORM_ANIMATION_DURATION)))
 				for scale in (1.2, 1.5, 1.8):
 					pulse = int(radius * (scale + phase * 0.5))
 					alpha = max(0, 200 - int(phase * 180) - int((scale - 1.0) * 60))
@@ -1566,9 +1584,10 @@ class SpiralGame:
 					self.screen.blit(surface, (cx - pulse, cy - pulse))
 				reward = emitter.last_reward
 				if reward > 0:
+					display_value = max(1, int(reward * phase)) if phase < 1.0 else reward
 					alpha = max(40, 255 - int(phase * 255))
 					scale = 1.0 + 0.4 * (1.0 - phase)
-					label = f"+{reward}"
+					label = f"+{display_value}"
 					text = self.font_large.render(label, True, (255, 255, 255))
 					text = pygame.transform.rotozoom(text, 0, scale)
 					surface = pygame.Surface(text.get_size(), pygame.SRCALPHA)
@@ -1576,6 +1595,12 @@ class SpiralGame:
 					surface.set_alpha(alpha)
 					rect = surface.get_rect(center=(cx, cy - radius - 12))
 					self.screen.blit(surface, rect)
+					if emitter.counted_eggs:
+						count_label = self.font_small.render(
+							f"{emitter.counted_eggs} eggs", True, (255, 240, 255)
+						)
+						count_rect = count_label.get_rect(center=(cx, cy + radius + 16))
+						self.screen.blit(count_label, count_rect)
 
 	def run(self) -> None:
 		running = True
@@ -1961,10 +1986,13 @@ class SpiralGame:
 		storm = self.placing_storm
 		storm.center = (int(x), int(y))
 		storm.progress = progress
-		storm.pass_count = 0
+		now_ms = pygame.time.get_ticks()
+		storm.window_count = 0
+		storm.counted_eggs = 0
 		storm.animation_until = 0
 		storm.last_reward = 0
-		storm.expires_at = pygame.time.get_ticks() + STORM_LIFETIME_MS
+		storm.settle_at = now_ms + STORM_WINDOW_DURATION
+		storm.expires_at = now_ms + STORM_LIFETIME_MS
 		self.storm_emitters = [storm]
 		self.placing_storm = None
 
@@ -2239,13 +2267,16 @@ class SpiralGame:
 	def process_storm_pass(self, ball: Ball) -> None:
 		if not self.storm_emitters:
 			return
+		now = pygame.time.get_ticks()
 		for storm in self.storm_emitters:
+			if not storm.settle_at:
+				continue
+			if now > storm.settle_at:
+				continue
 			impact_distance = self.progress_to_distance(storm.progress)
 			if not (ball.last_distance < impact_distance <= ball.distance):
 				continue
-			storm.pass_count += 1
-			if storm.pass_count >= STORM_PASS_INTERVAL:
-				self.trigger_storm(storm)
+			storm.window_count += 1
 
 	def process_bouncer_pass(self, ball: Ball) -> None:
 		if not self.bouncers:
@@ -2284,14 +2315,21 @@ class SpiralGame:
 		bouncer.passes_since_trigger = 0
 
 	def trigger_storm(self, storm: StormItem) -> None:
-		storm.pass_count = 0
+		if storm.last_reward > 0:
+			return
 		now = pygame.time.get_ticks()
+		storm.counted_eggs = max(storm.counted_eggs, storm.window_count)
+		progress = min(1.0, storm.counted_eggs / max(1, STORM_WINDOW_TARGET))
+		max_reward = STORM_MIN_EGGS + int((STORM_MAX_EGGS - STORM_MIN_EGGS) * progress)
+		max_reward = max(STORM_MIN_EGGS, min(STORM_MAX_EGGS, max_reward))
+		reward = random.randint(STORM_MIN_EGGS, max_reward)
+		storm.last_reward = reward
 		storm.animation_until = now + STORM_ANIMATION_DURATION
-		burst = random.randint(STORM_MIN_EGGS, STORM_MAX_EGGS)
-		storm.last_reward = burst
+		storm.window_count = 0
+		storm.settle_at = 0
 		if self.round_active:
-			self.score += burst
-			self.coins += burst
+			self.score += reward
+			self.coins += reward
 			self.check_round_victory()
 
 	def update_portals(self) -> None:
@@ -2386,6 +2424,7 @@ class SpiralGame:
 	def clone_storm_emitters(self) -> List[StormItem]:
 		"""Preserve storm emitters when carrying layouts forward."""
 		clones: List[StormItem] = []
+		now = pygame.time.get_ticks()
 		for storm in self.storm_emitters:
 			clones.append(
 				StormItem(
@@ -2394,10 +2433,12 @@ class SpiralGame:
 					center=storm.center,
 					progress=storm.progress,
 					radius=storm.radius,
-					pass_count=storm.pass_count,
+					window_count=0,
+					counted_eggs=0,
 					animation_until=0,
-					last_reward=storm.last_reward,
-					expires_at=storm.expires_at,
+					last_reward=0,
+					settle_at=now + STORM_WINDOW_DURATION,
+					expires_at=now + STORM_LIFETIME_MS,
 				)
 			)
 		return clones
