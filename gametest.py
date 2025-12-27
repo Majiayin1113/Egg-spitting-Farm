@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import random
 from bisect import bisect_left
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -27,7 +28,7 @@ ROUND_TIME = 60
 LEVEL_CONFIG = {
 	1: {"target": 180, "blocks": False},
 	2: {"target": 300, "blocks": True},
-	3: {"target": 2000, "blocks": True},
+	3: {"target": 3000, "blocks": True},
 	4: {"target": 4000, "blocks": True},
 }
 PIPE_COST_SCHEDULE = [10, 20, 25, 40, 60]
@@ -82,6 +83,14 @@ SHOP_ITEM_DETAILS = {
 		"title": "Portal Pair",
 		"desc": "Drop two gates anywhere to warp eggs forward for bursts of speed.",
 	},
+	"storm": {
+		"title": "Egg Storm",
+		"desc": "Every 20 eggs passing through detonates 30-100 instant points.",
+	},
+	"speed_boost": {
+		"title": "Speed Surge",
+		"desc": "Click to unleash x2 speed for 3s, then wait for cooldown.",
+	},
 }
 TOOLTIP_BG = (26, 32, 48)
 TOOLTIP_BORDER = (255, 255, 255)
@@ -98,6 +107,29 @@ BOUNCER_RADIUS = 38
 BOUNCER_PASS_INTERVAL = 10
 BOUNCER_NEIGHBOR_DISTANCE = 140.0
 BOUNCER_TRIGGER_SCORE = 5
+
+STORM_ITEM_COST = 80
+STORM_PASS_INTERVAL = 20
+STORM_MIN_EGGS = 30
+STORM_MAX_EGGS = 100
+STORM_ANIMATION_DURATION = 900  # milliseconds
+STORM_RADIUS = 42
+STORM_LIFETIME_MS = 10_000
+
+POWERUP_DELAY_MIN = 6.0
+POWERUP_DELAY_MAX = 11.0
+POWERUP_PROGRESS_MIN = 0.05
+POWERUP_PROGRESS_MAX = 0.95
+POWERUP_MAX_ACTIVE = 3
+POWERUP_RADIUS = 20
+POWERUP_GLOW = (255, 220, 140)
+POWERUP_BORDER = (30, 20, 50)
+POWERUP_ICON_COLOR = {
+	"speed_boost": (80, 200, 170),
+	"storm": (190, 120, 230),
+}
+REMOVAL_BONUS = 3
+REMOVAL_POPUP_DURATION = 900  # milliseconds
 
 PORTAL_COST = 10
 PORTAL_ACTIVE_DURATION = 10.0
@@ -238,12 +270,41 @@ class BouncerItem:
 
 
 @dataclass
+class StormItem:
+	id: int = 0
+	cost: int = STORM_ITEM_COST
+	center: Tuple[int, int] = (0, 0)
+	progress: float = 0.0
+	radius: int = STORM_RADIUS
+	pass_count: int = 0
+	animation_until: int = 0
+	last_reward: int = 0
+	expires_at: int = 0
+
+
+@dataclass
 class PortalItem:
 	id: int = 0
 	cost: int = PORTAL_COST
 	center: Tuple[int, int] = (0, 0)
 	progress: float = 0.0
 	radius: int = PORTAL_RADIUS
+
+
+@dataclass
+class TrackPowerup:
+	id: int = 0
+	kind: str = "speed_boost"
+	progress: float = 0.0
+	pos: Tuple[int, int] = (0, 0)
+	radius: int = POWERUP_RADIUS
+
+
+@dataclass
+class CoinPopup:
+	text: str
+	pos: Tuple[int, int]
+	expires: int
 
 
 class SpiralGame:
@@ -271,33 +332,48 @@ class SpiralGame:
 		self.portal_button = pygame.Rect(20, self.bouncer_button.bottom + button_gap, button_width, button_height)
 		self.turbo_button = pygame.Rect(20, self.portal_button.bottom + button_gap, button_width, button_height)
 		self.utility_rect = pygame.Rect(WIDTH - UTILITY_WIDTH, 0, UTILITY_WIDTH, HEIGHT)
+		ability_width = self.utility_rect.width - 40
 		self.speed_boost_button = pygame.Rect(
 			self.utility_rect.x + 20,
-			200,
-			self.utility_rect.width - 40,
 			140,
+			ability_width,
+			120,
 		)
-		skill_panel_height = 320
+		storm_button_height = 100
+		storm_button_y = self.speed_boost_button.bottom + 16
+		self.storm_button = pygame.Rect(
+			self.utility_rect.x + 20,
+			storm_button_y,
+			ability_width,
+			storm_button_height,
+		)
+		skill_panel_top = self.storm_button.bottom + 20
+		available_height = max(180, self.utility_rect.bottom - skill_panel_top - 20)
 		self.skill_panel_rect = pygame.Rect(
 			self.utility_rect.x + 10,
-			self.utility_rect.bottom - skill_panel_height - 20,
+			skill_panel_top,
 			self.utility_rect.width - 20,
-			skill_panel_height,
+			min(320, available_height),
 		)
-		btn_width = self.skill_panel_rect.width - 2 * SKILL_PANEL_MARGIN
-		btn_x = self.skill_panel_rect.x + SKILL_PANEL_MARGIN
+		icon_size = SKILL_BUTTON_HEIGHT
+		btn_x = self.skill_panel_rect.centerx - icon_size // 2
 		btn_y = self.skill_panel_rect.y + 80
-		skill_spacing = SKILL_BUTTON_HEIGHT + 10
+		skill_spacing = icon_size + 12
 		self.skill_buttons = {
-			"super_egg": pygame.Rect(btn_x, btn_y, btn_width, SKILL_BUTTON_HEIGHT),
-			"coin_rain": pygame.Rect(btn_x, btn_y + skill_spacing, btn_width, SKILL_BUTTON_HEIGHT),
+			"super_egg": pygame.Rect(btn_x, btn_y, icon_size, icon_size),
+			"coin_rain": pygame.Rect(btn_x, btn_y + skill_spacing, icon_size, icon_size),
 			"rapid_fire": pygame.Rect(
 				btn_x,
 				btn_y + 2 * skill_spacing,
-				btn_width,
-				SKILL_BUTTON_HEIGHT,
+				icon_size,
+				icon_size,
 			),
 		}
+		self.track_powerups: List[TrackPowerup] = []
+		self.powerup_counter = 0
+		self.powerup_spawn_timer = 0.0
+		self.powerup_spawn_delay = self.next_powerup_delay()
+		self.coin_popups: List[CoinPopup] = []
 		self.pipe_counter = 0
 		self.pipe_purchases = 0
 		self.block_counter = 0
@@ -310,6 +386,9 @@ class SpiralGame:
 		self.bouncer_counter = 0
 		self.bouncers: List[BouncerItem] = []
 		self.placing_bouncer: Optional[BouncerItem] = None
+		self.storm_counter = 0
+		self.storm_emitters: List[StormItem] = []
+		self.placing_storm: Optional[StormItem] = None
 		self.portal_counter = 0
 		self.portals: List[PortalItem] = []
 		self.placing_portal: Optional[PortalItem] = None
@@ -328,6 +407,8 @@ class SpiralGame:
 		self.rapid_fire_timer = 0.0
 		self.skill_modal_buttons: Dict[str, pygame.Rect] = {}
 		self.skill_confirm_button: Optional[pygame.Rect] = None
+		self.speed_boost_charges = 0
+		self.storm_charges = 0
 		self.shop_tooltip_data: Optional[Dict[str, Optional[str]]] = None
 		self.spawned_ball_count = 0
 		self.level_configs = LEVEL_CONFIG
@@ -343,11 +424,13 @@ class SpiralGame:
 			preserved_blocks = self.clone_blocks()
 			preserved_turbos = self.clone_turbo_pipes()
 			preserved_bouncers = self.clone_bouncers()
+			preserved_storms = self.clone_storm_emitters()
 			preserved_portals = self.clone_portals()
 			pipe_counter = self.pipe_counter
 			block_counter = self.block_counter
 			turbo_counter = self.turbo_counter
 			bouncer_counter = self.bouncer_counter
+			storm_counter = self.storm_counter
 			portal_counter = self.portal_counter
 			pipe_purchases = getattr(self, "pipe_purchases", 0)
 			block_purchases = getattr(self, "block_purchases", 0)
@@ -357,11 +440,13 @@ class SpiralGame:
 			preserved_blocks = []
 			preserved_turbos = []
 			preserved_bouncers = []
+			preserved_storms = []
 			preserved_portals = []
 			pipe_counter = 0
 			block_counter = 0
 			turbo_counter = 0
 			bouncer_counter = 0
+			storm_counter = 0
 			portal_counter = 0
 			pipe_purchases = 0
 			block_purchases = 0
@@ -388,6 +473,9 @@ class SpiralGame:
 		self.bouncers = preserved_bouncers
 		self.bouncer_counter = bouncer_counter
 		self.placing_bouncer = None
+		self.storm_emitters = preserved_storms
+		self.storm_counter = storm_counter
+		self.placing_storm = None
 		self.portals = preserved_portals
 		self.portal_counter = portal_counter
 		self.placing_portal = None
@@ -404,6 +492,13 @@ class SpiralGame:
 		self.skill_modal_buttons = {}
 		self.skill_confirm_button = None
 		self.spawned_ball_count = 0
+		self.track_powerups = []
+		self.powerup_counter = 0
+		self.powerup_spawn_timer = 0.0
+		self.powerup_spawn_delay = self.next_powerup_delay()
+		self.coin_popups = []
+		self.speed_boost_charges = 0
+		self.storm_charges = 0
 		if not self.skill_selection_required:
 			self.start_round_clock()
 
@@ -429,6 +524,9 @@ class SpiralGame:
 	def next_bouncer_cost(self) -> int:
 		return BOUNCER_COST
 
+	def next_storm_cost(self) -> int:
+		return STORM_ITEM_COST
+
 	def level_target(self) -> int:
 		cfg = self.level_configs.get(self.current_level, {})
 		return cfg.get("target", 0)
@@ -443,6 +541,9 @@ class SpiralGame:
 	def bouncer_enabled(self) -> bool:
 		return self.current_level >= 3
 
+	def storm_enabled(self) -> bool:
+		return self.current_level >= 3
+
 	def portal_enabled(self) -> bool:
 		return True
 
@@ -454,11 +555,108 @@ class SpiralGame:
 	def speed_boost_multiplier(self) -> float:
 		return SPEED_BOOST_FACTOR if self.speed_boost_active() else 1.0
 
+	def speed_boost_ui_visible(self) -> bool:
+		return self.speed_boost_active() or self.speed_boost_charges > 0
+
+	def storm_ui_visible(self) -> bool:
+		return self.storm_charges > 0 or self.placing_storm is not None
+
+	def next_powerup_delay(self) -> float:
+		return random.uniform(POWERUP_DELAY_MIN, POWERUP_DELAY_MAX)
+
+	def collectible_powerup_types(self) -> List[str]:
+		types: List[str] = []
+		if self.speed_boost_unlocked:
+			types.append("speed_boost")
+		if self.storm_enabled():
+			types.append("storm")
+		return types
+
 	def available_skill_keys(self) -> List[str]:
 		keys = ["super_egg", "coin_rain"]
 		if self.current_level >= 3:
 			keys.append("rapid_fire")
 		return keys
+
+	def spawn_track_powerup(self) -> bool:
+		options = self.collectible_powerup_types()
+		if not options:
+			return False
+		for _ in range(8):
+			kind = random.choice(options)
+			progress = random.uniform(POWERUP_PROGRESS_MIN, POWERUP_PROGRESS_MAX)
+			x, y = lerp_point(
+				self.track_points,
+				self.track_lengths,
+				self.track_total,
+				progress,
+			)
+			if any(
+				math.hypot(x - powerup.pos[0], y - powerup.pos[1]) < POWERUP_RADIUS * 3
+				for powerup in self.track_powerups
+			):
+				continue
+			self.powerup_counter += 1
+			self.track_powerups.append(
+				TrackPowerup(
+					id=self.powerup_counter,
+					kind=kind,
+					progress=progress,
+					pos=(int(x), int(y)),
+				)
+			)
+			return True
+		return False
+
+	def update_powerups(self, dt: float) -> None:
+		if not self.round_active or self.round_start_ms is None:
+			return
+		self.powerup_spawn_timer += dt
+		if not self.collectible_powerup_types():
+			self.powerup_spawn_timer = 0.0
+			return
+		if len(self.track_powerups) >= POWERUP_MAX_ACTIVE:
+			return
+		if self.powerup_spawn_timer >= self.powerup_spawn_delay:
+			if self.spawn_track_powerup():
+				self.powerup_spawn_timer = 0.0
+				self.powerup_spawn_delay = self.next_powerup_delay()
+
+	def update_storm_emitters(self) -> None:
+		if not self.storm_emitters:
+			return
+		now = pygame.time.get_ticks()
+		self.storm_emitters = [
+			storm for storm in self.storm_emitters if storm.expires_at == 0 or now < storm.expires_at
+		]
+
+	def collect_powerup(self, powerup: TrackPowerup) -> None:
+		if powerup.kind == "speed_boost":
+			self.speed_boost_charges += 1
+		elif powerup.kind == "storm":
+			self.storm_charges += 1
+		self.track_powerups = [item for item in self.track_powerups if item.id != powerup.id]
+
+	def check_powerup_collision(self, ball: Ball) -> None:
+		if not self.track_powerups or ball.in_pipe:
+			return
+		collected: List[TrackPowerup] = []
+		for powerup in self.track_powerups:
+			target_distance = self.progress_to_distance(powerup.progress)
+			if ball.last_distance < target_distance <= ball.distance:
+				collected.append(powerup)
+		for powerup in collected:
+			self.collect_powerup(powerup)
+
+	def add_coin_popup(self, pos: Tuple[int, int], text: str) -> None:
+		expires = pygame.time.get_ticks() + REMOVAL_POPUP_DURATION
+		self.coin_popups.append(CoinPopup(text=text, pos=pos, expires=expires))
+
+	def update_coin_popups(self) -> None:
+		if not self.coin_popups:
+			return
+		now = pygame.time.get_ticks()
+		self.coin_popups = [popup for popup in self.coin_popups if popup.expires > now]
 
 	def speed_boost_cooldown_remaining(self) -> float:
 		if not self.speed_boost_unlocked:
@@ -472,6 +670,7 @@ class SpiralGame:
 		now = pygame.time.get_ticks()
 		return (
 			self.speed_boost_unlocked
+			and self.speed_boost_charges > 0
 			and not self.speed_boost_active()
 			and now >= self.speed_boost_cooldown_until
 			and self.round_active
@@ -486,6 +685,7 @@ class SpiralGame:
 		self.speed_boost_cooldown_until = self.speed_boost_active_until + int(
 			SPEED_BOOST_COOLDOWN * 1000
 		)
+		self.speed_boost_charges = max(0, self.speed_boost_charges - 1)
 
 	def skill_status_text(self) -> str:
 		if self.current_level < ADVANCED_UNLOCK_LEVEL:
@@ -555,6 +755,8 @@ class SpiralGame:
 				self.apply_turbo_effects(ball, dt, multiplier)
 				self.apply_block_effects(ball)
 				self.apply_portal_effects(ball)
+				self.check_powerup_collision(ball)
+				self.process_storm_pass(ball)
 				self.process_bouncer_pass(ball)
 			if self.apply_pipe(ball, dt):
 				continue
@@ -566,6 +768,7 @@ class SpiralGame:
 					gain = fin.score_value + fin.bonus_score
 					self.score += gain
 					self.coins += gain
+					self.check_round_victory()
 			self.balls = [b for b in self.balls if b not in completed]
 
 	def remaining_time(self) -> int:
@@ -579,6 +782,16 @@ class SpiralGame:
 			self.round_result = "success" if self.score >= target else "fail"
 		return remaining
 
+	def check_round_victory(self) -> None:
+		if not self.round_active:
+			return
+		target = self.level_target()
+		if target <= 0:
+			return
+		if self.score >= target:
+			self.round_active = False
+			self.round_result = "success"
+
 	def update(self, dt: float) -> None:
 		if self.round_start_ms is None:
 			return
@@ -589,6 +802,9 @@ class SpiralGame:
 				self.spawn_timer -= SPAWN_INTERVAL
 		self.update_balls(dt)
 		self.update_blocks()
+		self.update_powerups(dt)
+		self.update_storm_emitters()
+		self.update_coin_popups()
 		self.apply_skill_income(dt)
 		self.apply_rapid_fire(dt)
 		self.update_portals()
@@ -598,7 +814,9 @@ class SpiralGame:
 		for pipe in self.pipes:
 			if pipe.rect:
 				pygame.draw.rect(self.screen, (255, 255, 255), pipe.rect, border_radius=6)
+		self.draw_track_powerups()
 		self.draw_portals()
+		self.draw_storm_emitters()
 		self.draw_bouncers()
 		self.draw_turbo_pipes()
 		self.draw_blocks()
@@ -732,69 +950,147 @@ class SpiralGame:
 		tip = self.font_small.render("Quick boosts", True, (150, 180, 210))
 		self.screen.blit(tip, (self.utility_rect.x + 20, 50))
 
-		btn_color = (70, 160, 140)
-		state_msg = "Click to surge"
-		locked = not self.speed_boost_unlocked
-		cooldown_remaining = self.speed_boost_cooldown_remaining()
-		if locked:
-			btn_color = (45, 60, 90)
-			state_msg = f"Unlock Lv{ADVANCED_UNLOCK_LEVEL}"
-		elif self.speed_boost_active():
-			btn_color = (220, 200, 90)
-			state_msg = "Active"
-		elif cooldown_remaining > 0:
-			btn_color = (55, 80, 110)
-			state_msg = "Cooldown"
+		if self.speed_boost_ui_visible():
+			btn_color = (70, 160, 140)
+			state_msg = "Click to surge"
+			note: Optional[str] = None
+			locked = not self.speed_boost_unlocked
+			cooldown_remaining = self.speed_boost_cooldown_remaining()
+			if locked:
+				btn_color = (45, 60, 90)
+				state_msg = f"Unlock Lv{ADVANCED_UNLOCK_LEVEL}"
+				note = state_msg
+			elif self.speed_boost_active():
+				btn_color = (220, 200, 90)
+				state_msg = "Active"
+			elif cooldown_remaining > 0:
+				btn_color = (55, 80, 110)
+				state_msg = "Cooldown"
+				seconds = f"{cooldown_remaining:0.1f}s"
+				note = f"Cooldown: {seconds}"
 
-		pygame.draw.rect(self.screen, btn_color, self.speed_boost_button, border_radius=10)
-		pygame.draw.rect(self.screen, (255, 255, 255), self.speed_boost_button, 2, border_radius=10)
-		label = self.font_small.render("Speed Boost", True, (12, 16, 25))
-		self.screen.blit(
-			label,
-			(
-				self.speed_boost_button.centerx - label.get_width() // 2,
-				self.speed_boost_button.y + 16,
-			),
-		)
-		sub = self.font_small.render(f"x{SPEED_BOOST_FACTOR:.1f} speed", True, (12, 16, 25))
-		self.screen.blit(
-			sub,
-			(
-				self.speed_boost_button.centerx - sub.get_width() // 2,
-				self.speed_boost_button.y + 46,
-			),
-		)
-		state_text = self.font_small.render(state_msg, True, (12, 16, 25))
-		self.screen.blit(
-			state_text,
-			(
-				self.speed_boost_button.centerx - state_text.get_width() // 2,
-				self.speed_boost_button.y + 76,
-			),
-		)
-		if self.speed_boost_active():
-			remaining = max(
-				0.0, (self.speed_boost_active_until - pygame.time.get_ticks()) / 1000.0
-			)
-			count_text = self.font_small.render(f"{remaining:0.1f}s", True, (12, 16, 25))
+			pygame.draw.rect(self.screen, btn_color, self.speed_boost_button, border_radius=10)
+			pygame.draw.rect(self.screen, (255, 255, 255), self.speed_boost_button, 2, border_radius=10)
+			label = self.font_small.render("Speed Boost", True, (12, 16, 25))
 			self.screen.blit(
-				count_text,
+				label,
 				(
-					self.speed_boost_button.centerx - count_text.get_width() // 2,
-					self.speed_boost_button.y + 106,
+					self.speed_boost_button.centerx - label.get_width() // 2,
+					self.speed_boost_button.y + 16,
 				),
 			)
-		elif cooldown_remaining > 0:
-			count_text = self.font_small.render(f"{cooldown_remaining:0.1f}s", True, (12, 16, 25))
+			sub = self.font_small.render(f"x{SPEED_BOOST_FACTOR:.1f} speed", True, (12, 16, 25))
 			self.screen.blit(
-				count_text,
+				sub,
 				(
-					self.speed_boost_button.centerx - count_text.get_width() // 2,
-					self.speed_boost_button.y + 106,
+					self.speed_boost_button.centerx - sub.get_width() // 2,
+					self.speed_boost_button.y + 46,
+				),
+			)
+			state_text = self.font_small.render(state_msg, True, (12, 16, 25))
+			self.screen.blit(
+				state_text,
+				(
+					self.speed_boost_button.centerx - state_text.get_width() // 2,
+					self.speed_boost_button.y + 76,
+				),
+			)
+			if self.speed_boost_active():
+				remaining = max(
+					0.0, (self.speed_boost_active_until - pygame.time.get_ticks()) / 1000.0
+				)
+				count_text = self.font_small.render(f"{remaining:0.1f}s", True, (12, 16, 25))
+				self.screen.blit(
+					count_text,
+					(
+						self.speed_boost_button.centerx - count_text.get_width() // 2,
+						self.speed_boost_button.y + 112,
+					),
+				)
+			elif cooldown_remaining > 0:
+				count_text = self.font_small.render(f"{cooldown_remaining:0.1f}s", True, (12, 16, 25))
+				self.screen.blit(
+					count_text,
+					(
+						self.speed_boost_button.centerx - count_text.get_width() // 2,
+						self.speed_boost_button.y + 112,
+					),
+				)
+			charge_label = f"Charges: {self.speed_boost_charges}"
+			charge_text = self.font_small.render(charge_label, True, (12, 16, 25))
+			self.screen.blit(
+				charge_text,
+				(
+					self.speed_boost_button.centerx - charge_text.get_width() // 2,
+					self.speed_boost_button.y + 96,
+				),
+			)
+			tip_parts = [note, charge_label]
+			tip_message = " · ".join(part for part in tip_parts if part)
+			self.queue_shop_tooltip(
+				"speed_boost",
+				self.speed_boost_button,
+				locked_note=tip_message or None,
+			)
+
+		if self.storm_ui_visible():
+			self.draw_storm_button()
+		elif not self.speed_boost_ui_visible():
+			spent = self.font_small.render("Collect boosts along the trail", True, (140, 150, 180))
+			self.screen.blit(
+				spent,
+				(
+					self.utility_rect.x + 24,
+					self.speed_boost_button.y + 12,
 				),
 			)
 
 		self.draw_skill_panel()
+
+	def draw_storm_button(self) -> None:
+		charges = max(0, self.storm_charges)
+		btn_color = (150, 90, 200)
+		status = "One-time blast"
+		if self.placing_storm:
+			btn_color = (220, 210, 140)
+			status = "Click track to place"
+
+		pygame.draw.rect(self.screen, btn_color, self.storm_button, border_radius=12)
+		pygame.draw.rect(self.screen, (255, 255, 255), self.storm_button, 2, border_radius=12)
+		title = self.font_small.render("Egg Storm", True, (12, 16, 25))
+		self.screen.blit(
+			title,
+			(
+				self.storm_button.centerx - title.get_width() // 2,
+				self.storm_button.y + 8,
+			),
+		)
+		detail = self.font_small.render("Burst 30-100 pts", True, (12, 16, 25))
+		self.screen.blit(
+			detail,
+			(
+				self.storm_button.centerx - detail.get_width() // 2,
+				self.storm_button.y + 36,
+			),
+		)
+		charge_label = "Deploying now" if self.placing_storm else f"Charge: {charges}"
+		charge_text = self.font_small.render(charge_label, True, (12, 16, 25))
+		self.screen.blit(
+			charge_text,
+			(
+				self.storm_button.centerx - charge_text.get_width() // 2,
+				self.storm_button.y + 58,
+			),
+		)
+		status_text = self.font_small.render(status, True, (12, 16, 25))
+		self.screen.blit(
+			status_text,
+			(
+				self.storm_button.centerx - status_text.get_width() // 2,
+				self.storm_button.bottom - 24,
+			),
+		)
+		self.queue_shop_tooltip("storm", self.storm_button, locked_note=charge_label)
 
 	def draw_skill_panel(self) -> None:
 		panel = self.skill_panel_rect
@@ -812,37 +1108,47 @@ class SpiralGame:
 			self.screen.blit(locked, (panel.x + 12, panel.y + 70))
 			return
 		awaiting_choice = self.skill_selection_required
+		icon_padding = 6
 		for key in self.available_skill_keys():
 			rect = self.skill_buttons.get(key)
 			if rect is None:
 				continue
 			info = SKILL_INFO.get(key, {})
 			selected = key in self.active_skills
-			if selected:
-				btn_color = (90, 200, 150)
-				state = "Active"
-			elif awaiting_choice:
-				btn_color = (70, 120, 200)
-				state = "Click to equip"
-			else:
-				btn_color = (45, 60, 90)
-				state = "Inactive"
-			pygame.draw.rect(self.screen, btn_color, rect, border_radius=10)
-			pygame.draw.rect(self.screen, (255, 255, 255), rect, 2, border_radius=10)
-			label = self.font_small.render(info.get("title", key.title()), True, (12, 16, 25))
-			self.screen.blit(
-				label,
-				(rect.centerx - label.get_width() // 2, rect.y + 6),
+			locked = awaiting_choice and not selected
+			base_color = SKILL_COLORS.get(key, (70, 120, 200))
+			icon_rect = rect.inflate(-icon_padding * 2, -icon_padding * 2)
+			center = icon_rect.center
+			radius = icon_rect.width // 2
+			fill_color = base_color if selected else (
+				max(30, base_color[0] - 30),
+				max(30, base_color[1] - 30),
+				max(30, base_color[2] - 30),
 			)
-			detail = self.font_small.render(info.get("desc", "Passive bonus"), True, (12, 16, 25))
-			self.screen.blit(
-				detail,
-				(rect.centerx - detail.get_width() // 2, rect.y + 30),
-			)
-			state_text = self.font_small.render(state, True, (12, 16, 25))
-			self.screen.blit(
-				state_text,
-				(rect.centerx - state_text.get_width() // 2, rect.y + SKILL_BUTTON_HEIGHT - 16),
+			pygame.draw.circle(self.screen, fill_color, center, radius)
+			border_color = (255, 255, 255) if selected else (120, 150, 200)
+			if locked:
+				border_color = (255, 200, 140)
+			pygame.draw.circle(self.screen, border_color, center, radius, width=3)
+			glyph = info.get("title", key.title())[:1].upper()
+			glyph_text = self.font_large.render(glyph, True, (12, 16, 25))
+			glyph_rect = glyph_text.get_rect(center=center)
+			self.screen.blit(glyph_text, glyph_rect)
+			state_label = "Active" if selected else ("Equip" if awaiting_choice else "Passive")
+			state_color = (140, 255, 210) if selected else (180, 200, 220)
+			state_surface = self.font_small.render(state_label, True, state_color)
+			state_rect = state_surface.get_rect(center=(rect.centerx, rect.bottom + 12))
+			self.screen.blit(state_surface, state_rect)
+			tooltip_info = {
+				"title": info.get("title", key.title()),
+				"desc": info.get("desc", "Passive bonus"),
+			}
+			note = f"Status: {state_label}"
+			self.queue_shop_tooltip(
+				key,
+				rect,
+				locked_note=note,
+				info_override=tooltip_info,
 			)
 
 	def draw_skill_overlay(self) -> None:
@@ -1093,11 +1399,42 @@ class SpiralGame:
 				)
 				pygame.draw.circle(self.screen, (255, 255, 255), (int(pt[0]), int(pt[1])), 2)
 
+	def draw_track_powerups(self) -> None:
+		if not self.track_powerups:
+			return
+		for powerup in self.track_powerups:
+			x, y = powerup.pos
+			color = POWERUP_ICON_COLOR.get(powerup.kind, (255, 255, 200))
+			pygame.draw.circle(self.screen, POWERUP_GLOW, (int(x), int(y)), powerup.radius)
+			pygame.draw.circle(self.screen, POWERUP_BORDER, (int(x), int(y)), powerup.radius, width=2)
+			inner = max(6, powerup.radius - 6)
+			pygame.draw.circle(self.screen, color, (int(x), int(y)), inner)
+			glyph = "B" if powerup.kind == "speed_boost" else "E"
+			text = self.font_small.render(glyph, True, (12, 16, 25))
+			text_rect = text.get_rect(center=(int(x), int(y)))
+			self.screen.blit(text, text_rect)
+
+	def draw_coin_popups(self) -> None:
+		if not self.coin_popups:
+			return
+		now = pygame.time.get_ticks()
+		for popup in self.coin_popups:
+			remaining = max(0, popup.expires - now)
+			ratio = 1.0 - min(1.0, remaining / REMOVAL_POPUP_DURATION)
+			y_offset = -30 * ratio
+			alpha = max(0, 255 - int(ratio * 255))
+			surface = self.font_small.render(popup.text, True, (255, 255, 255))
+			render = surface.copy()
+			render.set_alpha(alpha)
+			rect = render.get_rect(center=(popup.pos[0], popup.pos[1] + y_offset))
+			self.screen.blit(render, rect)
+
 	def queue_shop_tooltip(
 		self,
 		key: str,
 		rect: pygame.Rect,
 		locked_note: Optional[str] = None,
+		info_override: Optional[Dict[str, str]] = None,
 	) -> None:
 		if (
 			self.current_level >= ADVANCED_UNLOCK_LEVEL
@@ -1107,7 +1444,7 @@ class SpiralGame:
 		mouse_pos = pygame.mouse.get_pos()
 		if not rect.collidepoint(mouse_pos):
 			return
-		info = SHOP_ITEM_DETAILS.get(key)
+		info = info_override or SHOP_ITEM_DETAILS.get(key)
 		if not info:
 			return
 		self.shop_tooltip_data = {
@@ -1207,6 +1544,39 @@ class SpiralGame:
 				y = cy + math.sin(angle) * indicator_len
 				pygame.draw.line(self.screen, (255, 200, 120), (cx, cy), (x, y), 2)
 
+	def draw_storm_emitters(self) -> None:
+		if not self.storm_emitters:
+			return
+		now = pygame.time.get_ticks()
+		for emitter in self.storm_emitters:
+			cx, cy = emitter.center
+			radius = emitter.radius
+			pygame.draw.circle(self.screen, (120, 80, 180), (cx, cy), radius, width=3)
+			pygame.draw.circle(self.screen, (220, 200, 255), (cx, cy), max(6, radius - 10), width=2)
+			pygame.draw.circle(self.screen, (255, 255, 255), (cx, cy), 4)
+			if emitter.animation_until > now:
+				phase = 1.0 - (emitter.animation_until - now) / STORM_ANIMATION_DURATION
+				for scale in (1.2, 1.5, 1.8):
+					pulse = int(radius * (scale + phase * 0.5))
+					alpha = max(0, 200 - int(phase * 180) - int((scale - 1.0) * 60))
+					if alpha <= 0 or pulse <= 0:
+						continue
+					surface = pygame.Surface((pulse * 2, pulse * 2), pygame.SRCALPHA)
+					pygame.draw.circle(surface, (255, 200, 120, alpha), (pulse, pulse), pulse, width=3)
+					self.screen.blit(surface, (cx - pulse, cy - pulse))
+				reward = emitter.last_reward
+				if reward > 0:
+					alpha = max(40, 255 - int(phase * 255))
+					scale = 1.0 + 0.4 * (1.0 - phase)
+					label = f"+{reward}"
+					text = self.font_large.render(label, True, (255, 255, 255))
+					text = pygame.transform.rotozoom(text, 0, scale)
+					surface = pygame.Surface(text.get_size(), pygame.SRCALPHA)
+					surface.blit(text, (0, 0))
+					surface.set_alpha(alpha)
+					rect = surface.get_rect(center=(cx, cy - radius - 12))
+					self.screen.blit(surface, rect)
+
 	def run(self) -> None:
 		running = True
 		while running:
@@ -1226,8 +1596,11 @@ class SpiralGame:
 							self.reset_round(next_level, carry_items=carry_layout)
 						elif event.key == pygame.K_r:
 							self.reset_round(1)
-				elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-					self.handle_click(event.pos)
+				elif event.type == pygame.MOUSEBUTTONDOWN:
+					if event.button == 1:
+						self.handle_click(event.pos)
+					elif event.button == 3:
+						self.handle_right_click(event.pos)
 
 			remaining = self.remaining_time()
 			self.update(dt)
@@ -1238,6 +1611,7 @@ class SpiralGame:
 			self.draw_track()
 			self.draw_machine()
 			self.draw_balls()
+			self.draw_coin_popups()
 			self.draw_panel(remaining)
 			self.draw_footer(remaining)
 			self.draw_skill_overlay()
@@ -1268,7 +1642,10 @@ class SpiralGame:
 		if self.turbo_button.collidepoint(pos):
 			self.try_purchase_turbo_pipe()
 			return
-		if self.speed_boost_button.collidepoint(pos):
+		if self.storm_ui_visible() and self.storm_button.collidepoint(pos):
+			self.try_purchase_storm()
+			return
+		if self.speed_boost_ui_visible() and self.speed_boost_button.collidepoint(pos):
 			self.try_activate_speed_boost()
 			return
 		play_min = SHOP_WIDTH + 20
@@ -1281,6 +1658,8 @@ class SpiralGame:
 			self.place_turbo_pipe(pos)
 		elif self.placing_bouncer and play_min < pos[0] < play_max:
 			self.place_bouncer(pos)
+		elif self.placing_storm and play_min < pos[0] < play_max:
+			self.place_storm(pos)
 		elif self.placing_portal and play_min < pos[0] < play_max:
 			self.place_portal(pos)
 
@@ -1290,6 +1669,7 @@ class SpiralGame:
 			or self.placing_block
 			or self.placing_turbo_pipe
 			or self.placing_bouncer
+			or self.placing_storm
 			or self.placing_portal
 		):
 			return
@@ -1309,6 +1689,7 @@ class SpiralGame:
 			or self.placing_pipe
 			or self.placing_turbo_pipe
 			or self.placing_bouncer
+			or self.placing_storm
 			or self.placing_portal
 		):
 			return
@@ -1328,6 +1709,7 @@ class SpiralGame:
 			or self.placing_pipe
 			or self.placing_block
 			or self.placing_bouncer
+			or self.placing_storm
 			or self.placing_portal
 		):
 			return
@@ -1344,7 +1726,13 @@ class SpiralGame:
 			return
 		if self.bouncers or self.placing_bouncer:
 			return
-		if self.placing_pipe or self.placing_block or self.placing_turbo_pipe or self.placing_portal:
+		if (
+			self.placing_pipe
+			or self.placing_block
+			or self.placing_turbo_pipe
+			or self.placing_portal
+			or self.placing_storm
+		):
 			return
 		cost = self.next_bouncer_cost()
 		if self.coins < cost:
@@ -1358,7 +1746,13 @@ class SpiralGame:
 			return
 		if self.placing_portal:
 			return
-		if self.placing_pipe or self.placing_block or self.placing_turbo_pipe or self.placing_bouncer:
+		if (
+			self.placing_pipe
+			or self.placing_block
+			or self.placing_turbo_pipe
+			or self.placing_bouncer
+			or self.placing_storm
+		):
 			return
 		if len(self.portals) >= 2:
 			return
@@ -1368,6 +1762,120 @@ class SpiralGame:
 		self.coins -= cost
 		self.portal_counter += 1
 		self.placing_portal = PortalItem(id=self.portal_counter, cost=cost)
+
+	def try_purchase_storm(self) -> None:
+		if not self.storm_enabled():
+			return
+		if self.storm_emitters or self.placing_storm:
+			return
+		if self.storm_charges <= 0:
+			return
+		if (
+			self.placing_pipe
+			or self.placing_block
+			or self.placing_turbo_pipe
+			or self.placing_bouncer
+			or self.placing_portal
+		):
+			return
+		self.storm_counter += 1
+		cost = self.next_storm_cost()
+		self.storm_charges = max(0, self.storm_charges - 1)
+		self.placing_storm = StormItem(id=self.storm_counter, cost=cost)
+
+	def handle_right_click(self, pos: Tuple[int, int]) -> None:
+		if self.current_level >= ADVANCED_UNLOCK_LEVEL and self.skill_selection_required:
+			return
+		if not (SHOP_WIDTH + 20 < pos[0] < WIDTH - UTILITY_WIDTH - 20):
+			return
+		if self.try_remove_item_at(pos):
+			self.coins += REMOVAL_BONUS
+			self.add_coin_popup(pos, f"+{REMOVAL_BONUS}")
+
+	def try_remove_item_at(self, pos: Tuple[int, int]) -> bool:
+		removers = [
+			self.remove_pipe_at,
+			self.remove_block_at,
+			self.remove_turbo_pipe_at,
+			self.remove_bouncer_at,
+			self.remove_storm_at,
+			self.remove_portal_at,
+		]
+		for remover in removers:
+			if remover(pos):
+				return True
+		return False
+
+	def remove_pipe_at(self, pos: Tuple[int, int]) -> bool:
+		if not self.pipes:
+			return False
+		for pipe in reversed(self.pipes):
+			if not pipe.rect:
+				continue
+			inflated = pipe.rect.inflate(20, 20)
+			if inflated.collidepoint(pos):
+				self.pipes.remove(pipe)
+				return True
+		return False
+
+	def remove_block_at(self, pos: Tuple[int, int]) -> bool:
+		if not self.blocks:
+			return False
+		px, py = pos
+		for block in reversed(self.blocks):
+			x, y = block.pos
+			if math.hypot(px - x, py - y) <= block.radius + 12:
+				self.blocks.remove(block)
+				return True
+		return False
+
+	def remove_turbo_pipe_at(self, pos: Tuple[int, int]) -> bool:
+		if not self.turbo_pipes:
+			return False
+		for turbo in reversed(self.turbo_pipes):
+			if not turbo.positions:
+				turbo.positions = self.build_turbo_positions(turbo.start_progress, turbo.end_progress)
+			distance = self.polyline_distance(turbo.positions, pos)
+			if distance <= 18:
+				self.turbo_pipes.remove(turbo)
+				return True
+		return False
+
+	def remove_bouncer_at(self, pos: Tuple[int, int]) -> bool:
+		if not self.bouncers:
+			return False
+		px, py = pos
+		for bouncer in reversed(self.bouncers):
+			x, y = bouncer.center
+			if math.hypot(px - x, py - y) <= bouncer.radius + 12:
+				self.bouncers.remove(bouncer)
+				return True
+		return False
+
+	def remove_storm_at(self, pos: Tuple[int, int]) -> bool:
+		if not self.storm_emitters:
+			return False
+		px, py = pos
+		for emitter in reversed(self.storm_emitters):
+			x, y = emitter.center
+			if math.hypot(px - x, py - y) <= emitter.radius + 12:
+				self.storm_emitters.remove(emitter)
+				return True
+		return False
+
+	def remove_portal_at(self, pos: Tuple[int, int]) -> bool:
+		if not self.portals:
+			return False
+		px, py = pos
+		for portal in reversed(self.portals):
+			x, y = portal.center
+			if math.hypot(px - x, py - y) <= portal.radius + 12:
+				self.portals.remove(portal)
+				self.portal_state = "inactive"
+				self.portal_active_until = 0
+				self.portal_freeze_until = 0
+				return True
+		return False
 
 	def place_pipe(self, pos: Tuple[int, int]) -> None:
 		if not self.placing_pipe:
@@ -1445,6 +1953,20 @@ class SpiralGame:
 		bouncer.armed = False
 		self.bouncers = [bouncer]
 		self.placing_bouncer = None
+
+	def place_storm(self, pos: Tuple[int, int]) -> None:
+		if not self.placing_storm:
+			return
+		x, y, progress = self.nearest_point_on_track(pos)
+		storm = self.placing_storm
+		storm.center = (int(x), int(y))
+		storm.progress = progress
+		storm.pass_count = 0
+		storm.animation_until = 0
+		storm.last_reward = 0
+		storm.expires_at = pygame.time.get_ticks() + STORM_LIFETIME_MS
+		self.storm_emitters = [storm]
+		self.placing_storm = None
 
 	def place_portal(self, pos: Tuple[int, int]) -> None:
 		if not self.placing_portal:
@@ -1552,6 +2074,36 @@ class SpiralGame:
 				path_dist = self.track_lengths[i] + seg_len * t
 				best_progress = path_dist / self.track_total if self.track_total else 0.0
 		return best_point[0], best_point[1], best_progress
+
+	def point_segment_distance(
+		self,
+		px: float,
+		py: float,
+		ax: float,
+		ay: float,
+		bx: float,
+		by: float,
+	) -> float:
+		dx = bx - ax
+		dy = by - ay
+		if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+			return math.hypot(px - ax, py - ay)
+		t = ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)
+		t = max(0.0, min(1.0, t))
+		closest_x = ax + dx * t
+		closest_y = ay + dy * t
+		return math.hypot(px - closest_x, py - closest_y)
+
+	def polyline_distance(self, points: Sequence[Tuple[float, float]], pos: Tuple[int, int]) -> float:
+		if len(points) < 2:
+			return float("inf")
+		px, py = pos
+		best = float("inf")
+		for i in range(len(points) - 1):
+			ax, ay = points[i]
+			bx, by = points[i + 1]
+			best = min(best, self.point_segment_distance(px, py, ax, ay, bx, by))
+		return best
 
 	def build_turbo_positions(self, start_progress: float, end_progress: float, samples: int = 16) -> List[Tuple[float, float]]:
 		if end_progress <= start_progress:
@@ -1684,6 +2236,17 @@ class SpiralGame:
 		ball.last_distance = ball.distance
 		ball.speed = max(ball.speed, BALL_ACCEL * 0.1)
 
+	def process_storm_pass(self, ball: Ball) -> None:
+		if not self.storm_emitters:
+			return
+		for storm in self.storm_emitters:
+			impact_distance = self.progress_to_distance(storm.progress)
+			if not (ball.last_distance < impact_distance <= ball.distance):
+				continue
+			storm.pass_count += 1
+			if storm.pass_count >= STORM_PASS_INTERVAL:
+				self.trigger_storm(storm)
+
 	def process_bouncer_pass(self, ball: Ball) -> None:
 		if not self.bouncers:
 			return
@@ -1719,6 +2282,17 @@ class SpiralGame:
 				neighbor.score_value = ball.score_value
 		bouncer.armed = False
 		bouncer.passes_since_trigger = 0
+
+	def trigger_storm(self, storm: StormItem) -> None:
+		storm.pass_count = 0
+		now = pygame.time.get_ticks()
+		storm.animation_until = now + STORM_ANIMATION_DURATION
+		burst = random.randint(STORM_MIN_EGGS, STORM_MAX_EGGS)
+		storm.last_reward = burst
+		if self.round_active:
+			self.score += burst
+			self.coins += burst
+			self.check_round_victory()
 
 	def update_portals(self) -> None:
 		if len(self.portals) < 2:
@@ -1805,6 +2379,25 @@ class SpiralGame:
 					radius=bouncer.radius,
 					passes_since_trigger=bouncer.passes_since_trigger,
 					armed=bouncer.armed,
+				)
+			)
+		return clones
+
+	def clone_storm_emitters(self) -> List[StormItem]:
+		"""Preserve storm emitters when carrying layouts forward."""
+		clones: List[StormItem] = []
+		for storm in self.storm_emitters:
+			clones.append(
+				StormItem(
+					id=storm.id,
+					cost=storm.cost,
+					center=storm.center,
+					progress=storm.progress,
+					radius=storm.radius,
+					pass_count=storm.pass_count,
+					animation_until=0,
+					last_reward=storm.last_reward,
+					expires_at=storm.expires_at,
 				)
 			)
 		return clones
