@@ -27,8 +27,8 @@ ROUND_TIME = 60
 LEVEL_CONFIG = {
 	1: {"target": 180, "blocks": False},
 	2: {"target": 300, "blocks": True},
-	3: {"target": 800, "blocks": True},
-	4: {"target": 1200, "blocks": True},
+	3: {"target": 2000, "blocks": True},
+	4: {"target": 4000, "blocks": True},
 }
 PIPE_COST_SCHEDULE = [10, 20, 25, 40, 60]
 PIPE_HEIGHT = 180
