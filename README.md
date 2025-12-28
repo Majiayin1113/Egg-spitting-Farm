@@ -47,3 +47,24 @@ Z-Trail Drop 是一款基于 2D 的休闲策略游戏，核心玩法围绕路径
 - 各类装置是否形成互补协同；
 
 核心理念是“效率越高，得分越高”，力求打造类似“优化一台机器”的策略体验。
+
+## 浏览器体验（Gradio / Hugging Face）
+
+项目根目录新增了 `requirements.txt` 与 `app.py`，用于在没有实体显示器的环境中（如 Hugging Face Space）通过 Gradio 运行 pygame 版本。
+
+### 本地运行步骤
+
+1. 安装依赖：`pip install -r requirements.txt`
+2. 启动 Web Demo：`python app.py`
+3. 浏览器访问控制台输出的地址（默认 http://127.0.0.1:7860），即可看到实时画面。
+	- 左键点击游戏画面即可购买/放置道具；
+	- 切换右侧的 “Remove / Right Click” 模式，可以模拟右键回收；
+	- 通过 Pause/Retry/Next/Reset 按钮可快速控制关卡进度。
+
+### 部署到 Hugging Face Space
+
+1. 在 Hugging Face 创建一个新的 Space，选择 **Gradio** 作为 SDK。
+2. 将本项目（至少包含 `gametest.py`、`app.py`、`requirements.txt`、`README.md`）推送到该 Space 的 Git 仓库。
+3. Space 会自动根据 `requirements.txt` 安装依赖，并执行 `python app.py` 启动服务；首个构建大约需要 2-3 分钟。
+4. 若需要自定义端口或额外环境变量，可在 Space 的 Settings → Variables 中设置；默认配置即可兼容本项目。
+5. 构建完成后即可将 Space 链接分享给他人在线体验。
