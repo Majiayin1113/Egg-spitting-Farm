@@ -31,7 +31,7 @@ LEVEL_CONFIG = {
 	3: {"target": 3000, "blocks": True},
 	4: {"target": 4000, "blocks": True},
 }
-PIPE_COST_SCHEDULE = [10, 20, 25, 40, 60]
+PIPE_COST_SCHEDULE = [10, 20, 25, 40, 60,100,180,250,400]
 PIPE_HEIGHT = 180
 PIPE_SPEED = 1000
 BALL_RADIUS = 12
@@ -42,7 +42,12 @@ BLOCK_COST = 20
 BLOCK_SLOW_FACTOR = 0.35
 BLOCK_BONUS = 2
 BLOCK_DURATION = 5.0
-BLOCK_COST_SCHEDULE = [16, 25, 30, 38, 40, 50,80,100,120,150]
+BLOCK_COOLDOWN_DURATION = 30.0
+BLOCK_COOLDOWN_REDUCTION = 10.0
+BLOCK_UPGRADED_DURATION = 10.0
+BLOCK_ACTIVE_COLOR = (255, 140, 90)
+BLOCK_COOLDOWN_COLOR = (120, 90, 70)
+BLOCK_COST_SCHEDULE = [16, 25, 30, 38, 40, 50,80,100,120,150,200,250,300,400,500]
 SPEED_BOOST_DURATION = 3.0
 SPEED_BOOST_FACTOR = 2.0
 SPEED_BOOST_COOLDOWN = 20.0
@@ -97,7 +102,7 @@ TOOLTIP_BORDER = (255, 255, 255)
 TOOLTIP_TEXT = (230, 240, 255)
 
 RAPID_FIRE_INTERVAL = 0.5
-TURBO_PIPE_COST_SCHEDULE = [25, 45, 60, 80, 110]
+TURBO_PIPE_COST_SCHEDULE = [25, 45, 60, 80, 110,180,250,300,400,500	]
 TURBO_PIPE_LENGTH = 0.05  # portion of the track covered
 TURBO_PIPE_MULTIPLIER = 2.0
 TURBO_PIPE_COLOR = (255, 120, 40)
@@ -247,6 +252,12 @@ class BlockItem:
 	pos: Tuple[float, float] = (0.0, 0.0)
 	radius: int = 18
 	spawn_ms: int = 0
+	is_active: bool = False
+	active_duration: float = BLOCK_DURATION
+	active_until_ms: int = 0
+	cooldown_duration: float = BLOCK_COOLDOWN_DURATION
+	cooldown_start_ms: int = 0
+	cooldown_end_ms: int = 0
 
 
 @dataclass
@@ -1349,11 +1360,18 @@ class SpiralGame:
 			x, y = block.pos
 			rect = pygame.Rect(0, 0, block.radius * 2, block.radius * 2)
 			rect.center = (int(x), int(y))
-			pygame.draw.rect(self.screen, (255, 140, 90), rect, border_radius=6)
+			color = BLOCK_ACTIVE_COLOR if block.is_active else BLOCK_COOLDOWN_COLOR
+			pygame.draw.rect(self.screen, color, rect, border_radius=6)
 			pygame.draw.rect(self.screen, (255, 255, 255), rect, 2, border_radius=6)
-			remaining = max(0.0, BLOCK_DURATION - (now - block.spawn_ms) / 1000.0)
-			seconds = max(0, int(math.ceil(remaining)))
-			text = self.font_small.render(str(seconds), True, (12, 16, 25))
+			if block.is_active:
+				remaining = max(0.0, (block.active_until_ms - now) / 1000.0)
+			else:
+				remaining = max(0.0, (block.cooldown_end_ms - now) / 1000.0)
+			if remaining <= 0.0:
+				continue
+			seconds = int(math.ceil(remaining))
+			text_color = (12, 16, 25) if block.is_active else (230, 235, 250)
+			text = self.font_small.render(str(seconds), True, text_color)
 			text_rect = text.get_rect(center=rect.center)
 			self.screen.blit(text, text_rect)
 
@@ -1383,7 +1401,7 @@ class SpiralGame:
 			pygame.draw.rect(self.screen, (255, 200, 120), cap, border_radius=3)
 		elif icon_type == "block":
 			square = inner.copy()
-			pygame.draw.rect(self.screen, (255, 140, 90), square, border_radius=6)
+			pygame.draw.rect(self.screen, BLOCK_ACTIVE_COLOR, square, border_radius=6)
 			pygame.draw.rect(self.screen, (255, 255, 255), square, 2, border_radius=6)
 		elif icon_type == "turbo":
 			points = [
@@ -1691,6 +1709,8 @@ class SpiralGame:
 		if self.placing_pipe and play_min < pos[0] < play_max:
 			self.place_pipe(pos)
 		elif self.placing_block and play_min < pos[0] < play_max:
+			if self.try_upgrade_block(pos):
+				return
 			self.place_block(pos)
 		elif self.placing_turbo_pipe and play_min < pos[0] < play_max:
 			self.place_turbo_pipe(pos)
@@ -1957,9 +1977,54 @@ class SpiralGame:
 		block = self.placing_block
 		block.pos = (x, y)
 		block.progress = progress
-		block.spawn_ms = pygame.time.get_ticks()
+		now = pygame.time.get_ticks()
+		self.activate_block(block, now)
 		self.blocks.append(block)
 		self.placing_block = None
+
+	def activate_block(self, block: BlockItem, now: int) -> None:
+		block.is_active = True
+		block.spawn_ms = now
+		block.active_until_ms = now + int(block.active_duration * 1000)
+		block.cooldown_start_ms = 0
+		block.cooldown_end_ms = 0
+
+	def begin_block_cooldown(self, block: BlockItem, now: int) -> None:
+		block.is_active = False
+		block.cooldown_start_ms = now
+		block.cooldown_end_ms = now + int(block.cooldown_duration * 1000)
+		if block.cooldown_duration <= 0.0:
+			self.activate_block(block, now)
+
+	def block_at_position(self, pos: Tuple[int, int]) -> Optional[BlockItem]:
+		px, py = pos
+		for block in reversed(self.blocks):
+			x, y = block.pos
+			if math.hypot(px - x, py - y) <= block.radius + 12:
+				return block
+		return None
+
+	def try_upgrade_block(self, pos: Tuple[int, int]) -> bool:
+		if not self.blocks:
+			return False
+		target = self.block_at_position(pos)
+		if not target:
+			return False
+		self.apply_block_upgrade(target)
+		self.placing_block = None
+		return True
+
+	def apply_block_upgrade(self, block: BlockItem) -> None:
+		"""Consume a purchased block to refresh an installed one."""
+		now = pygame.time.get_ticks()
+		block.active_duration = max(block.active_duration, BLOCK_UPGRADED_DURATION)
+		if block.is_active:
+			block.active_until_ms = block.spawn_ms + int(block.active_duration * 1000)
+		block.cooldown_duration = max(0.0, block.cooldown_duration - BLOCK_COOLDOWN_REDUCTION)
+		if not block.is_active:
+			block.cooldown_end_ms = block.cooldown_start_ms + int(block.cooldown_duration * 1000)
+			if block.cooldown_end_ms <= now:
+				self.activate_block(block, now)
 
 	def place_turbo_pipe(self, pos: Tuple[int, int]) -> None:
 		if not self.placing_turbo_pipe:
@@ -2162,9 +2227,16 @@ class SpiralGame:
 		if not self.blocks:
 			return
 		now = pygame.time.get_ticks()
-		self.blocks = [
-			block for block in self.blocks if (now - block.spawn_ms) / 1000.0 < BLOCK_DURATION
-		]
+		for block in self.blocks:
+			if block.is_active:
+				if block.active_until_ms == 0:
+					block.active_until_ms = block.spawn_ms + int(block.active_duration * 1000)
+				if now >= block.active_until_ms:
+					self.begin_block_cooldown(block, now)
+			else:
+				cooldown_ready = block.cooldown_end_ms == 0 or now >= block.cooldown_end_ms
+				if block.cooldown_duration <= 0.0 or cooldown_ready:
+					self.activate_block(block, now)
 
 	def apply_skill_income(self, dt: float) -> None:
 		if "coin_rain" not in self.active_skills or not self.round_active:
@@ -2225,6 +2297,8 @@ class SpiralGame:
 		if not self.blocks:
 			return
 		for block in self.blocks:
+			if not block.is_active:
+				continue
 			if block.id in ball.block_hits:
 				continue
 			block_distance = self.progress_to_distance(block.progress)
@@ -2392,16 +2466,17 @@ class SpiralGame:
 		clones: List[BlockItem] = []
 		now = pygame.time.get_ticks()
 		for block in self.blocks:
-			clones.append(
-				BlockItem(
-					id=block.id,
-					cost=block.cost,
-					progress=block.progress,
-					pos=block.pos,
-					radius=block.radius,
-					spawn_ms=now,
-				)
+			clone = BlockItem(
+				id=block.id,
+				cost=block.cost,
+				progress=block.progress,
+				pos=block.pos,
+				radius=block.radius,
+				active_duration=block.active_duration,
+				cooldown_duration=block.cooldown_duration,
 			)
+			self.activate_block(clone, now)
+			clones.append(clone)
 		return clones
 
 	def clone_turbo_pipes(self) -> List[TurboPipeItem]:
