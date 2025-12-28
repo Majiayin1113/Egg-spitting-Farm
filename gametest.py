@@ -73,7 +73,7 @@ SHOP_ITEM_DETAILS = {
 	},
 	"turbo": {
 		"title": "Turbo Pipe",
-		"desc": "Lay a glowing lane that doubles egg speed along a segment.",
+		"desc": "Lay a glowing lane that doubles egg speed and points along a segment.",
 	},
 	"bouncer": {
 		"title": "Bounce Pad",
@@ -659,6 +659,19 @@ class SpiralGame:
 	def add_coin_popup(self, pos: Tuple[int, int], text: str) -> None:
 		expires = pygame.time.get_ticks() + REMOVAL_POPUP_DURATION
 		self.coin_popups.append(CoinPopup(text=text, pos=pos, expires=expires))
+
+	def show_turbo_bonus_popup(self, ball: Ball, bonus: int) -> None:
+		if bonus <= 0:
+			return
+		progress = self.ball_progress(ball)
+		x, y = lerp_point(
+			self.track_points,
+			self.track_lengths,
+			self.track_total,
+			progress,
+		)
+		offset_y = max(20, y - (BALL_RADIUS + 12))
+		self.add_coin_popup((int(x), int(offset_y)), f"+{bonus}")
 
 	def update_coin_popups(self) -> None:
 		if not self.coin_popups:
@@ -2230,6 +2243,9 @@ class SpiralGame:
 			if ball.last_distance < end_distance and ball.distance > start_distance:
 				zone_multiplier = max(zone_multiplier, TURBO_PIPE_MULTIPLIER)
 				if turbo.id not in ball.turbo_hits and ball.last_distance <= start_distance:
+					previous_value = ball.score_value
+					ball.score_value *= 2
+					self.show_turbo_bonus_popup(ball, ball.score_value - previous_value)
 					ball.speed = min(
 						ball.speed * TURBO_PIPE_MULTIPLIER,
 						BALL_MAX_SPEED * TURBO_PIPE_MULTIPLIER,
