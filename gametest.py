@@ -84,8 +84,8 @@ SHOP_ITEM_DETAILS = {
 		"desc": "Lay a glowing lane that doubles egg speed and points along a segment.",
 	},
 	"bouncer": {
-		"title": "Bounce Pad",
-		"desc": "Arms every 10 eggs; a 5-pt egg will ricochet to start and share its value.",
+		"title": "Supply Pad",
+		"desc": "When 3 vertical pipes are placed, bursts into 3-5 pickups around it.",
 	},
 	"portal": {
 		"title": "Portal Pair",
@@ -112,9 +112,10 @@ TURBO_PIPE_COLOR = (255, 120, 40)
 
 BOUNCER_COST = 10
 BOUNCER_RADIUS = 38
-BOUNCER_PASS_INTERVAL = 10
-BOUNCER_NEIGHBOR_DISTANCE = 140.0
-BOUNCER_TRIGGER_SCORE = 5
+BOUNCER_PIPE_REQUIREMENT = 3
+BOUNCER_DROP_MIN = 3
+BOUNCER_DROP_MAX = 5
+BOUNCER_DROP_SPREAD = 0.04
 
 STORM_ITEM_COST = 80
 STORM_MIN_EGGS = 80
@@ -280,8 +281,8 @@ class BouncerItem:
 	center: Tuple[int, int] = (0, 0)
 	progress: float = 0.0
 	radius: int = BOUNCER_RADIUS
-	passes_since_trigger: int = 0
-	armed: bool = False
+	required_pipes: int = BOUNCER_PIPE_REQUIREMENT
+	triggered: bool = False
 
 
 @dataclass
@@ -403,6 +404,7 @@ class SpiralGame:
 		self.turbo_purchases = 0
 		self.turbo_pipes: List[TurboPipeItem] = []
 		self.bouncer_counter = 0
+		self.bouncer_purchases = 0
 		self.bouncers: List[BouncerItem] = []
 		self.placing_bouncer: Optional[BouncerItem] = None
 		self.storm_counter = 0
@@ -801,7 +803,6 @@ class SpiralGame:
 				self.apply_portal_effects(ball)
 				self.check_powerup_collision(ball)
 				self.process_storm_pass(ball)
-				self.process_bouncer_pass(ball)
 			if self.apply_pipe(ball, dt):
 				continue
 			if ball.distance >= self.track_total:
@@ -846,6 +847,7 @@ class SpiralGame:
 				self.spawn_timer -= SPAWN_INTERVAL
 		self.update_balls(dt)
 		self.update_blocks()
+		self.update_bouncer_supply()
 		self.update_powerups(dt)
 		self.update_storm_emitters()
 		self.update_coin_popups()
@@ -1303,8 +1305,13 @@ class SpiralGame:
 			btn_color = (220, 210, 140)
 			note = "Click track to place"
 		elif placed:
-			btn_color = (120, 190, 150)
-			note = "Pad ready"
+			remaining = max(0, self.bouncers[0].required_pipes - len(self.pipes))
+			if remaining > 0:
+				btn_color = (150, 110, 160)
+				note = f"Need {remaining} pipes"
+			else:
+				btn_color = (120, 190, 150)
+				note = "Dropping soon"
 		elif not unlocked:
 			btn_color = (45, 50, 70)
 			note = "Unlocks at Level 3"
@@ -1580,14 +1587,16 @@ class SpiralGame:
 			radius = bouncer.radius
 			outer_rect = pygame.Rect(0, 0, radius * 2, radius * 2)
 			outer_rect.center = (cx, cy)
-			base_color = (60, 90, 150) if bouncer.armed else (35, 45, 70)
+			remaining = max(0, bouncer.required_pipes - len(self.pipes))
+			ready = remaining == 0
+			base_color = (90, 200, 180) if ready else (35, 45, 70)
+			inner_color = (255, 245, 180) if ready else (140, 210, 255)
 			pygame.draw.circle(self.screen, base_color, (cx, cy), radius, width=3)
-			pygame.draw.circle(self.screen, (140, 210, 255), (cx, cy), max(6, radius - 8), width=2)
-			indicator_len = radius + 10
-			for angle in (math.pi / 2, -math.pi / 2):
-				x = cx + math.cos(angle) * indicator_len
-				y = cy + math.sin(angle) * indicator_len
-				pygame.draw.line(self.screen, (255, 200, 120), (cx, cy), (x, y), 2)
+			pygame.draw.circle(self.screen, inner_color, (cx, cy), max(6, radius - 8), width=2)
+			text_value = str(remaining)
+			text_surface = self.font_small.render(text_value, True, (255, 255, 255))
+			text_rect = text_surface.get_rect(center=(cx, cy))
+			self.screen.blit(text_surface, text_rect)
 
 	def draw_storm_emitters(self) -> None:
 		if not self.storm_emitters:
@@ -2078,10 +2087,9 @@ class SpiralGame:
 		bouncer = self.placing_bouncer
 		bouncer.center = (int(x), int(y))
 		bouncer.progress = progress
-		bouncer.passes_since_trigger = 0
-		bouncer.armed = False
 		self.bouncers = [bouncer]
 		self.placing_bouncer = None
+		self.update_bouncer_supply()
 
 	def place_storm(self, pos: Tuple[int, int]) -> None:
 		if not self.placing_storm:
@@ -2319,6 +2327,45 @@ class SpiralGame:
 				if block.cooldown_duration <= 0.0 or cooldown_ready:
 					self.activate_block(block, now)
 
+	def update_bouncer_supply(self) -> None:
+		if not self.bouncers:
+			return
+		bouncer = self.bouncers[0]
+		if bouncer.triggered:
+			return
+		remaining = bouncer.required_pipes - len(self.pipes)
+		if remaining > 0:
+			return
+		self.spawn_bouncer_drops(bouncer)
+		bouncer.triggered = True
+		self.bouncers = []
+
+	def spawn_bouncer_drops(self, bouncer: BouncerItem) -> None:
+		drop_options = self.collectible_powerup_types()
+		if not drop_options:
+			drop_options = ["speed_boost"]
+		count = random.randint(BOUNCER_DROP_MIN, BOUNCER_DROP_MAX)
+		for _ in range(count):
+			offset = random.uniform(-BOUNCER_DROP_SPREAD, BOUNCER_DROP_SPREAD)
+			progress = min(max(bouncer.progress + offset, 0.0), 1.0)
+			x, y = lerp_point(
+				self.track_points,
+				self.track_lengths,
+				self.track_total,
+				progress,
+			)
+			self.powerup_counter += 1
+			kind = random.choice(drop_options)
+			self.track_powerups.append(
+				TrackPowerup(
+					id=self.powerup_counter,
+					kind=kind,
+					progress=progress,
+					pos=(int(x), int(y)),
+				)
+			)
+		self.add_coin_popup(bouncer.center, f"{count} drops")
+
 	def apply_skill_income(self, dt: float) -> None:
 		if "coin_rain" not in self.active_skills or not self.round_active:
 			return
@@ -2448,42 +2495,6 @@ class SpiralGame:
 				continue
 			storm.window_count += 1
 
-	def process_bouncer_pass(self, ball: Ball) -> None:
-		if not self.bouncers:
-			return
-		for bouncer in self.bouncers:
-			impact_distance = self.progress_to_distance(bouncer.progress)
-			if not (ball.last_distance < impact_distance <= ball.distance):
-				continue
-			bouncer.passes_since_trigger += 1
-			if bouncer.armed and ball.score_value == BOUNCER_TRIGGER_SCORE:
-				self.trigger_bouncer(bouncer, ball, impact_distance)
-				continue
-			if bouncer.passes_since_trigger >= BOUNCER_PASS_INTERVAL:
-				bouncer.armed = True
-				bouncer.passes_since_trigger = min(
-					bouncer.passes_since_trigger,
-					BOUNCER_PASS_INTERVAL,
-				)
-
-	def trigger_bouncer(self, bouncer: BouncerItem, ball: Ball, impact_distance: float) -> None:
-		ball.distance = 0.0
-		ball.last_distance = 0.0
-		ball.speed = 0.0
-		ball.in_pipe = False
-		ball.pipe_id = None
-		ball.used_pipes.clear()
-		ball.block_hits.clear()
-		ball.turbo_hits.clear()
-		for neighbor in self.balls:
-			if neighbor is ball:
-				continue
-			if abs(neighbor.distance - impact_distance) <= BOUNCER_NEIGHBOR_DISTANCE:
-				neighbor.score_value = ball.score_value
-				neighbor.coin_value = ball.coin_value
-		bouncer.armed = False
-		bouncer.passes_since_trigger = 0
-
 	def trigger_storm(self, storm: StormItem) -> None:
 		if storm.last_reward > 0:
 			return
@@ -2583,8 +2594,8 @@ class SpiralGame:
 					center=bouncer.center,
 					progress=bouncer.progress,
 					radius=bouncer.radius,
-					passes_since_trigger=bouncer.passes_since_trigger,
-					armed=bouncer.armed,
+					required_pipes=bouncer.required_pipes,
+					triggered=bouncer.triggered,
 				)
 			)
 		return clones
