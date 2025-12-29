@@ -148,6 +148,9 @@ PORTAL_ACTIVE_DURATION = 10.0
 PORTAL_RADIUS = 26
 PORTAL_GLOW_COLOR = (130, 200, 255)
 PORTAL_BASE_COLOR = (30, 50, 90)
+PORTAL_COOLDOWN_DURATION = 40.0
+PORTAL_COOLDOWN_REDUCTION = 10.0
+PORTAL_INFUSION_RANGE = PORTAL_RADIUS + 14
 
 ADVANCED_UNLOCK_LEVEL = 2  # Level where passives and boosts become available
 
@@ -425,6 +428,7 @@ class SpiralGame:
 		self.placing_portal: Optional[PortalItem] = None
 		self.portal_state: str = "inactive"
 		self.portal_active_until = 0
+		self.portal_cooldown_until = 0
 		self.placing_pipe: Optional[PipeItem] = None
 		self.placing_block: Optional[BlockItem] = None
 		self.placing_turbo_pipe: Optional[TurboPipeItem] = None
@@ -518,6 +522,7 @@ class SpiralGame:
 		self.placing_portal = None
 		self.portal_state = "inactive"
 		self.portal_active_until = 0
+		self.portal_cooldown_until = 0
 		self.speed_boost_unlocked = self.current_level >= ADVANCED_UNLOCK_LEVEL
 		self.speed_boost_active_until = 0
 		self.speed_boost_cooldown_until = 0
@@ -875,6 +880,8 @@ class SpiralGame:
 			self.round_active = False
 			if self.round_result != "success":
 				self.round_result = "fail"
+				self.reset_round(1)
+				return ROUND_TIME
 		return remaining
 
 	def check_round_victory(self) -> None:
@@ -1424,6 +1431,8 @@ class SpiralGame:
 		cost = self.next_portal_cost()
 		btn_color = (130, 190, 255)
 		state_note: Optional[str] = None
+		timer_text: Optional[str] = None
+		now = pygame.time.get_ticks()
 		if self.placing_portal:
 			btn_color = (230, 210, 140)
 			state_note = "Click map to set"
@@ -1437,16 +1446,20 @@ class SpiralGame:
 		elif len(self.portals) >= 2:
 			if self.portal_state == "active":
 				state_note = "Active"
+				remaining = max(0.0, (self.portal_active_until - now) / 1000.0)
+				timer_text = f"{remaining:0.1f}s"
+			elif self.portal_state == "cooldown":
+				state_note = "Cooldown"
+				remaining = max(0.0, (self.portal_cooldown_until - now) / 1000.0)
+				timer_text = f"CD {remaining:0.1f}s"
 			else:
 				state_note = "Priming"
 		pygame.draw.rect(self.screen, btn_color, self.portal_button, border_radius=10)
 		pygame.draw.rect(self.screen, (255, 255, 255), self.portal_button, 2, border_radius=10)
 		self.draw_shop_cost(self.portal_button, cost)
 		self.draw_shop_icon(self.portal_button, "portal")
-		if len(self.portals) >= 2 and self.portal_state == "active":
-			now = pygame.time.get_ticks()
-			remaining = max(0.0, (self.portal_active_until - now) / 1000.0)
-			count_text = self.font_small.render(f"{remaining:0.1f}s", True, (12, 16, 25))
+		if timer_text:
+			count_text = self.font_small.render(timer_text, True, (12, 16, 25))
 			self.screen.blit(
 				count_text,
 				(
@@ -1668,7 +1681,12 @@ class SpiralGame:
 		for portal in self.portals:
 			cx, cy = portal.center
 			radius = portal.radius
-			color = PORTAL_GLOW_COLOR if state == "active" else (70, 90, 130)
+			if state == "active":
+				color = PORTAL_GLOW_COLOR
+			elif state == "cooldown":
+				color = (230, 190, 110)
+			else:
+				color = (70, 90, 130)
 			outer_rect = pygame.Rect(0, 0, radius * 2, radius * 2)
 			outer_rect.center = (cx, cy)
 			pygame.draw.ellipse(self.screen, PORTAL_BASE_COLOR, outer_rect.inflate(10, 24), 2)
@@ -1761,7 +1779,7 @@ class SpiralGame:
 						self.reset_round(next_level, carry_items=carry_layout)
 					elif not self.round_active:
 						if event.key == pygame.K_SPACE and self.round_result == "fail":
-							self.reset_round(self.current_level)
+							self.reset_round(1)
 						elif event.key == pygame.K_r:
 							self.reset_round(1)
 				elif event.type == pygame.MOUSEBUTTONDOWN:
@@ -1924,7 +1942,7 @@ class SpiralGame:
 			or self.placing_storm
 		):
 			return
-		if len(self.portals) >= 2:
+		if len(self.portals) >= 2 and self.portal_state != "cooldown":
 			return
 		cost = self.next_portal_cost()
 		if self.coins < cost:
@@ -2046,6 +2064,7 @@ class SpiralGame:
 				self.portals.remove(portal)
 				self.portal_state = "inactive"
 				self.portal_active_until = 0
+				self.portal_cooldown_until = 0
 				return True
 		return False
 
@@ -2215,8 +2234,13 @@ class SpiralGame:
 			return
 		x, y, progress = self.nearest_point_on_track(pos)
 		x, y, progress = self.snap_progress_point(progress)
+		target_point = (int(x), int(y))
+		if self.portal_state == "cooldown" and len(self.portals) >= 2:
+			if self.try_accelerate_portal_cooldown(target_point):
+				self.placing_portal = None
+			return
 		portal = self.placing_portal
-		portal.center = (int(x), int(y))
+		portal.center = target_point
 		portal.progress = progress
 		self.portals.append(portal)
 		self.portals.sort(key=lambda item: item.progress)
@@ -2226,6 +2250,7 @@ class SpiralGame:
 			self.portals.sort(key=lambda item: item.progress)
 		self.portal_state = "inactive"
 		self.portal_active_until = 0
+		self.portal_cooldown_until = 0
 
 	def ball_progress(self, ball: Ball) -> float:
 		if self.track_total <= 0:
@@ -2613,20 +2638,56 @@ class SpiralGame:
 			self.coins += reward
 			self.check_round_victory()
 
+	def activate_portals(self, now: Optional[int] = None) -> None:
+		if len(self.portals) < 2:
+			self.portal_state = "inactive"
+			self.portal_active_until = 0
+			self.portal_cooldown_until = 0
+			return
+		if now is None:
+			now = pygame.time.get_ticks()
+		self.portal_state = "active"
+		self.portal_active_until = now + int(PORTAL_ACTIVE_DURATION * 1000)
+		self.portal_cooldown_until = 0
+
+	def try_accelerate_portal_cooldown(self, pos: Tuple[int, int]) -> bool:
+		if self.portal_state != "cooldown" or len(self.portals) < 2:
+			return False
+		px, py = pos
+		for portal in self.portals:
+			cx, cy = portal.center
+			if math.hypot(px - cx, py - cy) > PORTAL_INFUSION_RANGE:
+				continue
+			now = pygame.time.get_ticks()
+			reduction_ms = int(PORTAL_COOLDOWN_REDUCTION * 1000)
+			remaining = max(0, self.portal_cooldown_until - now)
+			remaining = max(0, remaining - reduction_ms)
+			if remaining == 0:
+				self.activate_portals(now)
+			else:
+				self.portal_cooldown_until = now + remaining
+			self.add_coin_popup(portal.center, f"-{int(PORTAL_COOLDOWN_REDUCTION)}s")
+			return True
+		return False
+
 	def update_portals(self) -> None:
 		if len(self.portals) < 2:
 			self.portal_state = "inactive"
 			self.portal_active_until = 0
+			self.portal_cooldown_until = 0
 			return
 		now = pygame.time.get_ticks()
-		if self.portal_state != "active":
-			self.portal_state = "active"
-			self.portal_active_until = now + int(PORTAL_ACTIVE_DURATION * 1000)
+		if self.portal_state == "inactive":
+			self.activate_portals(now)
 			return
-		if now >= self.portal_active_until:
-			self.portals.clear()
-			self.portal_state = "inactive"
-			self.portal_active_until = 0
+		if self.portal_state == "active":
+			if now >= self.portal_active_until:
+				self.portal_state = "cooldown"
+				self.portal_cooldown_until = now + int(PORTAL_COOLDOWN_DURATION * 1000)
+				self.portal_active_until = 0
+			return
+		if self.portal_state == "cooldown" and now >= self.portal_cooldown_until:
+			self.activate_portals(now)
 
 	def clone_pipes(self) -> List[PipeItem]:
 		"""Make deep copies of all placed pipes so layouts can persist."""
