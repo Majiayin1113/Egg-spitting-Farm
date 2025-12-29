@@ -18,10 +18,13 @@ FONT_LARGE_SIZE = 30
 FONT_SMALL_SIZE = 16
 BG_COLOR = (12, 16, 25)
 TRACK_COLOR = (51, 178, 255)
+TRACK_NODE_COLOR = (255, 255, 255)
+TRACK_NODE_RADIUS = 3
 MACHINE_COLOR = (255, 180, 64)
 PANEL_COLOR = (24, 34, 52)
 PANEL_BORDER = (90, 110, 160)
 BALL_COLORS = [(255, 92, 138), (255, 214, 102), (130, 255, 173), (138, 189, 255)]
+TRACK_NODE_COUNT = 80
 
 SPAWN_INTERVAL = 0.3
 ROUND_TIME = 60
@@ -29,7 +32,7 @@ LEVEL_CONFIG = {
 	1: {"target": 180, "blocks": False},
 	2: {"target": 300, "blocks": True},
 	3: {"target": 3000, "blocks": True},
-	4: {"target": 4000, "blocks": True},
+	4: {"target": 10000, "blocks": True},
 }
 PIPE_COST_SCHEDULE = [10, 20, 25, 40, 60,100,180,250,400]
 PIPE_HEIGHT = 180
@@ -53,7 +56,7 @@ SPEED_BOOST_FACTOR = 2.0
 SPEED_BOOST_COOLDOWN = 20.0
 SPECIAL_EGG_VALUE = 10
 SPECIAL_EGG_COLORS = ((255, 250, 160), (255, 110, 150))
-COIN_RAIN_RATE = 10
+COIN_RAIN_RATE = 5
 SKILL_BUTTON_HEIGHT = 56
 SKILL_PANEL_MARGIN = 16
 SKILL_INFO = {
@@ -102,9 +105,9 @@ TOOLTIP_BORDER = (255, 255, 255)
 TOOLTIP_TEXT = (230, 240, 255)
 
 RAPID_FIRE_INTERVAL = 0.5
-TURBO_PIPE_COST_SCHEDULE = [25, 45, 60, 80, 110,180,250,300,400,500	]
+TURBO_PIPE_COST_SCHEDULE = [25, 45, 60, 80, 110,250,300,500,1000,2000]
 TURBO_PIPE_LENGTH = 0.05  # portion of the track covered
-TURBO_PIPE_MULTIPLIER = 2.0
+TURBO_PIPE_MULTIPLIER = 1.5
 TURBO_PIPE_COLOR = (255, 120, 40)
 
 BOUNCER_COST = 10
@@ -333,6 +336,8 @@ class SpiralGame:
 		self.track_points = build_z_path(WIDTH, HEIGHT)
 		self.track_lengths = cumulative_lengths(self.track_points)
 		self.track_total = self.track_lengths[-1]
+		self.track_nodes = self.build_track_nodes(TRACK_NODE_COUNT)
+		self.track_node_progress = [node[2] for node in self.track_nodes]
 
 		self.machine_pos = (WIDTH // 2, 70)
 		self.shop_rect = pygame.Rect(0, 0, SHOP_WIDTH, HEIGHT)
@@ -644,8 +649,12 @@ class SpiralGame:
 		for storm in self.storm_emitters:
 			if storm.settle_at and now >= storm.settle_at and storm.last_reward == 0:
 				self.trigger_storm(storm)
-			if storm.expires_at and storm.expires_at <= now:
-				continue
+			if storm.last_reward > 0:
+				if storm.animation_until and now >= storm.animation_until:
+					continue
+			else:
+				if storm.expires_at and storm.expires_at <= now:
+					continue
 			active.append(storm)
 		self.storm_emitters = active
 
@@ -843,6 +852,13 @@ class SpiralGame:
 
 	def draw_track(self) -> None:
 		pygame.draw.lines(self.screen, TRACK_COLOR, False, self.track_points, 4)
+		for node_x, node_y, _ in self.track_nodes:
+			pygame.draw.circle(
+				self.screen,
+				TRACK_NODE_COLOR,
+				(int(node_x), int(node_y)),
+				TRACK_NODE_RADIUS,
+			)
 		for pipe in self.pipes:
 			if pipe.rect:
 				pygame.draw.rect(self.screen, (255, 255, 255), pipe.rect, border_radius=6)
@@ -1824,7 +1840,7 @@ class SpiralGame:
 	def try_purchase_storm(self) -> None:
 		if not self.storm_enabled():
 			return
-		if self.storm_emitters or self.placing_storm:
+		if self.placing_storm:
 			return
 		if self.storm_charges <= 0:
 			return
@@ -1959,13 +1975,22 @@ class SpiralGame:
 			rect.midtop = (x, top_y)
 			entry_prog, exit_prog = top_prog, bottom_prog
 			entry_y, exit_y = top_y, bottom_y
+		start_node, end_node = self.snap_progress_span(entry_prog, exit_prog)
+		_, entry_y, entry_prog = start_node
+		_, exit_y, exit_prog = end_node
 		pipe = self.placing_pipe
-		pipe.rect = rect
+		pipe_width = rect.width
+		pipe_x = rect.centerx
+		visual_top = min(entry_y, exit_y) - 10
+		visual_height = max(20, abs(exit_y - entry_y) + 20)
+		snapped_rect = pygame.Rect(0, 0, pipe_width, int(visual_height))
+		snapped_rect.midtop = (int(pipe_x), int(visual_top))
+		pipe.rect = snapped_rect
 		pipe.entry_progress = entry_prog
 		pipe.exit_progress = exit_prog
 		pipe.entry_y = entry_y
 		pipe.exit_y = exit_y
-		pipe.x = rect.centerx
+		pipe.x = pipe_x
 		self.pipes.append(pipe)
 		self.pipes.sort(key=lambda item: item.entry_progress)
 		self.placing_pipe = None
@@ -1974,6 +1999,7 @@ class SpiralGame:
 		if not self.placing_block:
 			return
 		x, y, progress = self.nearest_point_on_track(pos)
+		x, y, progress = self.snap_progress_point(progress)
 		block = self.placing_block
 		block.pos = (x, y)
 		block.progress = progress
@@ -2037,6 +2063,9 @@ class SpiralGame:
 			missing = length - (end_prog - start_prog)
 			start_prog = max(0.0, start_prog - missing / 2)
 			end_prog = min(1.0, end_prog + missing / 2)
+		start_node, end_node = self.snap_progress_span(start_prog, end_prog)
+		start_prog = start_node[2]
+		end_prog = end_node[2]
 		turbo = self.placing_turbo_pipe
 		turbo.start_progress = start_prog
 		turbo.end_progress = end_prog
@@ -2049,6 +2078,7 @@ class SpiralGame:
 		if not self.placing_bouncer:
 			return
 		x, y, progress = self.nearest_point_on_track(pos)
+		x, y, progress = self.snap_progress_point(progress)
 		bouncer = self.placing_bouncer
 		bouncer.center = (int(x), int(y))
 		bouncer.progress = progress
@@ -2061,6 +2091,7 @@ class SpiralGame:
 		if not self.placing_storm:
 			return
 		x, y, progress = self.nearest_point_on_track(pos)
+		x, y, progress = self.snap_progress_point(progress)
 		storm = self.placing_storm
 		storm.center = (int(x), int(y))
 		storm.progress = progress
@@ -2071,13 +2102,14 @@ class SpiralGame:
 		storm.last_reward = 0
 		storm.settle_at = now_ms + STORM_WINDOW_DURATION
 		storm.expires_at = now_ms + STORM_LIFETIME_MS
-		self.storm_emitters = [storm]
+		self.storm_emitters.append(storm)
 		self.placing_storm = None
 
 	def place_portal(self, pos: Tuple[int, int]) -> None:
 		if not self.placing_portal:
 			return
 		x, y, progress = self.nearest_point_on_track(pos)
+		x, y, progress = self.snap_progress_point(progress)
 		portal = self.placing_portal
 		portal.center = (int(x), int(y))
 		portal.progress = progress
@@ -2180,6 +2212,60 @@ class SpiralGame:
 				path_dist = self.track_lengths[i] + seg_len * t
 				best_progress = path_dist / self.track_total if self.track_total else 0.0
 		return best_point[0], best_point[1], best_progress
+
+	def build_track_nodes(self, count: int) -> List[Tuple[float, float, float]]:
+		nodes: List[Tuple[float, float, float]] = []
+		if self.track_total <= 0 or count <= 1:
+			x, y = self.track_points[0]
+			nodes.append((x, y, 0.0))
+			return nodes
+		for idx in range(count):
+			progress = idx / (count - 1)
+			x, y = lerp_point(self.track_points, self.track_lengths, self.track_total, progress)
+			nodes.append((x, y, progress))
+		return nodes
+
+	def closest_track_node_index(self, progress: float) -> int:
+		if not getattr(self, "track_node_progress", None):
+			return 0
+		progress = max(0.0, min(progress, 1.0))
+		idx = bisect_left(self.track_node_progress, progress)
+		if idx >= len(self.track_node_progress):
+			idx = len(self.track_node_progress) - 1
+		elif idx > 0:
+			prev_prog = self.track_node_progress[idx - 1]
+			curr_prog = self.track_node_progress[idx]
+			if abs(progress - prev_prog) <= abs(curr_prog - progress):
+				idx -= 1
+		return idx
+
+	def snap_progress_point(self, progress: float) -> Tuple[float, float, float]:
+		if not self.track_nodes:
+			x, y = self.track_points[0]
+			return x, y, 0.0
+		idx = self.closest_track_node_index(progress)
+		x, y, snapped = self.track_nodes[idx]
+		return x, y, snapped
+
+	def snap_progress_span(
+		self,
+		start_prog: float,
+		end_prog: float,
+	) -> Tuple[Tuple[float, float, float], Tuple[float, float, float]]:
+		if not self.track_nodes:
+			first = (self.track_points[0][0], self.track_points[0][1], 0.0)
+			last = (self.track_points[-1][0], self.track_points[-1][1], 1.0)
+			return first, last
+		start_idx = self.closest_track_node_index(start_prog)
+		end_idx = self.closest_track_node_index(end_prog)
+		if start_idx == end_idx:
+			if end_idx < len(self.track_nodes) - 1:
+				end_idx += 1
+			elif start_idx > 0:
+				start_idx -= 1
+		if start_idx > end_idx:
+			start_idx, end_idx = end_idx, start_idx
+		return self.track_nodes[start_idx], self.track_nodes[end_idx]
 
 	def point_segment_distance(
 		self,
@@ -2415,6 +2501,7 @@ class SpiralGame:
 		reward = random.randint(STORM_MIN_EGGS, max_reward)
 		storm.last_reward = reward
 		storm.animation_until = now + STORM_ANIMATION_DURATION
+		storm.expires_at = storm.animation_until
 		storm.window_count = 0
 		storm.settle_at = 0
 		if self.round_active:
