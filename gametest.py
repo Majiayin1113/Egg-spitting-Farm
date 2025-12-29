@@ -85,7 +85,7 @@ SHOP_ITEM_DETAILS = {
 	},
 	"bouncer": {
 		"title": "Supply Pad",
-		"desc": "When 3 vertical pipes are placed, bursts into 3-5 pickups around it.",
+		"desc": "Collect trail capsules to charge it, then place three pads to scatter 3-5 pickups.",
 	},
 	"portal": {
 		"title": "Portal Pair",
@@ -112,10 +112,11 @@ TURBO_PIPE_COLOR = (255, 120, 40)
 
 BOUNCER_COST = 10
 BOUNCER_RADIUS = 38
-BOUNCER_PIPE_REQUIREMENT = 3
+BOUNCER_TRIGGER_REMOVALS = 3
 BOUNCER_DROP_MIN = 3
 BOUNCER_DROP_MAX = 5
 BOUNCER_DROP_SPREAD = 0.04
+BOUNCEPAD_POWERUP_KIND = "bouncepad"
 
 STORM_ITEM_COST = 80
 STORM_MIN_EGGS = 80
@@ -137,6 +138,7 @@ POWERUP_BORDER = (30, 20, 50)
 POWERUP_ICON_COLOR = {
 	"speed_boost": (80, 200, 170),
 	"storm": (190, 120, 230),
+	"bouncepad": (230, 150, 255),
 }
 REMOVAL_BONUS = 3
 REMOVAL_POPUP_DURATION = 900  # milliseconds
@@ -281,8 +283,8 @@ class BouncerItem:
 	center: Tuple[int, int] = (0, 0)
 	progress: float = 0.0
 	radius: int = BOUNCER_RADIUS
-	required_pipes: int = BOUNCER_PIPE_REQUIREMENT
-	triggered: bool = False
+	removals_remaining: int = BOUNCER_TRIGGER_REMOVALS
+	ready_to_drop: bool = False
 
 
 @dataclass
@@ -348,8 +350,7 @@ class SpiralGame:
 		first_y = 120
 		self.pipe_button = pygame.Rect(20, first_y, button_width, button_height)
 		self.block_button = pygame.Rect(20, self.pipe_button.bottom + button_gap, button_width, button_height)
-		self.bouncer_button = pygame.Rect(20, self.block_button.bottom + button_gap, button_width, button_height)
-		self.portal_button = pygame.Rect(20, self.bouncer_button.bottom + button_gap, button_width, button_height)
+		self.portal_button = pygame.Rect(20, self.block_button.bottom + button_gap, button_width, button_height)
 		self.turbo_button = pygame.Rect(20, self.portal_button.bottom + button_gap, button_width, button_height)
 		self.utility_rect = pygame.Rect(WIDTH - UTILITY_WIDTH, 0, UTILITY_WIDTH, HEIGHT)
 		ability_width = self.utility_rect.width - 40
@@ -367,7 +368,15 @@ class SpiralGame:
 			ability_width,
 			storm_button_height,
 		)
-		skill_panel_top = self.storm_button.bottom + 20
+		bouncepad_button_height = 100
+		bouncepad_button_y = self.storm_button.bottom + 16
+		self.bouncepad_button = pygame.Rect(
+			self.utility_rect.x + 20,
+			bouncepad_button_y,
+			ability_width,
+			bouncepad_button_height,
+		)
+		skill_panel_top = self.bouncepad_button.bottom + 20
 		available_height = max(180, self.utility_rect.bottom - skill_panel_top - 20)
 		self.skill_panel_rect = pygame.Rect(
 			self.utility_rect.x + 10,
@@ -430,6 +439,7 @@ class SpiralGame:
 		self.skill_confirm_button: Optional[pygame.Rect] = None
 		self.speed_boost_charges = 0
 		self.storm_charges = 0
+		self.bouncepad_charges = 0
 		self.shop_tooltip_data: Optional[Dict[str, Optional[str]]] = None
 		self.spawned_ball_count = 0
 		self.level_configs = LEVEL_CONFIG
@@ -525,6 +535,7 @@ class SpiralGame:
 		self.coin_popups = []
 		self.speed_boost_charges = 0
 		self.storm_charges = 0
+		self.bouncepad_charges = 0
 		if not self.skill_selection_required:
 			self.start_round_clock()
 
@@ -546,9 +557,6 @@ class SpiralGame:
 
 	def next_portal_cost(self) -> int:
 		return PORTAL_COST * (2 ** self.portal_purchases)
-
-	def next_bouncer_cost(self) -> int:
-		return BOUNCER_COST * (2 ** self.bouncer_purchases)
 
 	def next_storm_cost(self) -> int:
 		return STORM_ITEM_COST
@@ -573,6 +581,31 @@ class SpiralGame:
 	def portal_enabled(self) -> bool:
 		return True
 
+	def pending_bouncer_target(self) -> Optional[BouncerItem]:
+		for bouncer in self.bouncers:
+			if not bouncer.ready_to_drop and bouncer.removals_remaining > 0:
+				return bouncer
+		return None
+
+	def bouncer_removal_status(self) -> Optional[Tuple[int, int]]:
+		target = self.pending_bouncer_target()
+		if not target:
+			return None
+		remaining = max(0, target.removals_remaining)
+		progress = max(0, BOUNCER_TRIGGER_REMOVALS - remaining)
+		return progress, remaining
+
+	def handle_tool_removed(self, _kind: str) -> None:
+		if not self.bouncers:
+			return
+		target = self.pending_bouncer_target()
+		if not target:
+			return
+		target.removals_remaining = max(0, target.removals_remaining - 1)
+		if target.removals_remaining == 0:
+			target.ready_to_drop = True
+		self.update_bouncer_supply()
+
 	def speed_boost_active(self) -> bool:
 		if not self.speed_boost_unlocked:
 			return False
@@ -587,6 +620,15 @@ class SpiralGame:
 	def storm_ui_visible(self) -> bool:
 		return self.storm_charges > 0 or self.placing_storm is not None
 
+	def bouncepad_ui_visible(self) -> bool:
+		if not self.bouncer_enabled():
+			return False
+		return (
+			self.placing_bouncer is not None
+			or self.bouncepad_charges > 0
+			or bool(self.bouncers)
+		)
+
 	def next_powerup_delay(self) -> float:
 		return random.uniform(POWERUP_DELAY_MIN, POWERUP_DELAY_MAX)
 
@@ -596,6 +638,8 @@ class SpiralGame:
 			types.append("speed_boost")
 		if self.storm_enabled():
 			types.append("storm")
+		if self.bouncer_enabled():
+			types.append(BOUNCEPAD_POWERUP_KIND)
 		return types
 
 	def available_skill_keys(self) -> List[str]:
@@ -670,6 +714,8 @@ class SpiralGame:
 			self.speed_boost_charges += 1
 		elif powerup.kind == "storm":
 			self.storm_charges += 1
+		elif powerup.kind == BOUNCEPAD_POWERUP_KIND:
+			self.bouncepad_charges += 1
 		self.track_powerups = [item for item in self.track_powerups if item.id != powerup.id]
 
 	def check_powerup_collision(self, ball: Ball) -> None:
@@ -988,8 +1034,6 @@ class SpiralGame:
 
 		if self.blocks_enabled():
 			self.draw_block_button()
-
-		self.draw_bouncer_button()
 		self.draw_portal_button()
 		self.draw_turbo_button()
 
@@ -1102,6 +1146,8 @@ class SpiralGame:
 				),
 			)
 
+		self.draw_bouncepad_button()
+
 		self.draw_skill_panel()
 
 	def draw_storm_button(self) -> None:
@@ -1148,6 +1194,82 @@ class SpiralGame:
 			),
 		)
 		self.queue_shop_tooltip("storm", self.storm_button, locked_note=charge_label)
+
+	def draw_bouncepad_button(self) -> None:
+		if not self.bouncepad_ui_visible():
+			return
+		btn_color = (200, 120, 210)
+		label = "Supply Pad"
+		sub_text = "Scatter 3-5 pickups"
+		status: Optional[str]
+		progress_info = self.bouncer_removal_status()
+		if self.placing_bouncer:
+			btn_color = (230, 210, 140)
+			status = "Click track to place"
+		elif progress_info:
+			progress_done, remaining = progress_info
+			if remaining > 0:
+				btn_color = (150, 110, 160)
+				status = f"Sell {remaining} tools"
+			else:
+				btn_color = (120, 190, 150)
+				status = "Drop ready"
+		else:
+			status = "Awaiting pad placement"
+		pygame.draw.rect(self.screen, btn_color, self.bouncepad_button, border_radius=12)
+		pygame.draw.rect(self.screen, (255, 255, 255), self.bouncepad_button, 2, border_radius=12)
+		title = self.font_small.render(label, True, (12, 16, 25))
+		self.screen.blit(
+			title,
+			(
+				self.bouncepad_button.centerx - title.get_width() // 2,
+				self.bouncepad_button.y + 8,
+			),
+		)
+		sub = self.font_small.render(sub_text, True, (12, 16, 25))
+		self.screen.blit(
+			sub,
+			(
+				self.bouncepad_button.centerx - sub.get_width() // 2,
+				self.bouncepad_button.y + 36,
+			),
+		)
+		if progress_info:
+			progress_done, remaining = progress_info
+		else:
+			progress_done, remaining = 0, BOUNCER_TRIGGER_REMOVALS
+		progress_text = f"Removals {progress_done}/{BOUNCER_TRIGGER_REMOVALS}"
+		progress_surf = self.font_small.render(progress_text, True, (12, 16, 25))
+		self.screen.blit(
+			progress_surf,
+			(
+				self.bouncepad_button.centerx - progress_surf.get_width() // 2,
+				self.bouncepad_button.y + 58,
+			),
+		)
+		charge_label = (
+			"Placing now" if self.placing_bouncer else f"Charges: {max(0, self.bouncepad_charges)}"
+		)
+		charge_surf = self.font_small.render(charge_label, True, (12, 16, 25))
+		self.screen.blit(
+			charge_surf,
+			(
+				self.bouncepad_button.centerx - charge_surf.get_width() // 2,
+				self.bouncepad_button.y + 78,
+			),
+		)
+		if status:
+			status_surf = self.font_small.render(status, True, (12, 16, 25))
+			self.screen.blit(
+				status_surf,
+				(
+					self.bouncepad_button.centerx - status_surf.get_width() // 2,
+					self.bouncepad_button.bottom - 26,
+				),
+			)
+		tip_parts = [charge_label, progress_text, status]
+		locked_note = " · ".join(part for part in tip_parts if part)
+		self.queue_shop_tooltip("bouncer", self.bouncepad_button, locked_note=locked_note or None)
 
 	def draw_skill_panel(self) -> None:
 		panel = self.skill_panel_rect
@@ -1297,34 +1419,6 @@ class SpiralGame:
 		self.draw_shop_cost(self.block_button, current_cost)
 		self.draw_shop_icon(self.block_button, "block")
 		self.queue_shop_tooltip("block", self.block_button)
-
-	def draw_bouncer_button(self) -> None:
-		btn_color = (200, 120, 210)
-		cost = self.next_bouncer_cost()
-		unlocked = self.bouncer_enabled()
-		placed = bool(self.bouncers)
-		note: Optional[str] = None
-		if self.placing_bouncer:
-			btn_color = (220, 210, 140)
-			note = "Click track to place"
-		elif placed:
-			remaining = max(0, self.bouncers[0].required_pipes - len(self.pipes))
-			if remaining > 0:
-				btn_color = (150, 110, 160)
-				note = f"Need {remaining} pipes"
-			else:
-				btn_color = (120, 190, 150)
-				note = "Dropping soon"
-		elif not unlocked:
-			btn_color = (45, 50, 70)
-			note = "Unlocks at Level 3"
-		elif self.coins < cost:
-			btn_color = (55, 60, 90)
-		pygame.draw.rect(self.screen, btn_color, self.bouncer_button, border_radius=10)
-		pygame.draw.rect(self.screen, (255, 255, 255), self.bouncer_button, 2, border_radius=10)
-		self.draw_shop_cost(self.bouncer_button, cost)
-		self.draw_shop_icon(self.bouncer_button, "bouncer")
-		self.queue_shop_tooltip("bouncer", self.bouncer_button, locked_note=note)
 
 	def draw_portal_button(self) -> None:
 		cost = self.next_portal_cost()
@@ -1586,12 +1680,12 @@ class SpiralGame:
 		if not self.bouncers:
 			return
 		for bouncer in self.bouncers:
+			remaining = max(0, bouncer.removals_remaining)
 			cx, cy = bouncer.center
 			radius = bouncer.radius
 			outer_rect = pygame.Rect(0, 0, radius * 2, radius * 2)
 			outer_rect.center = (cx, cy)
-			remaining = max(0, bouncer.required_pipes - len(self.pipes))
-			ready = remaining == 0
+			ready = bouncer.ready_to_drop or remaining == 0
 			base_color = (90, 200, 180) if ready else (35, 45, 70)
 			inner_color = (255, 245, 180) if ready else (140, 210, 255)
 			pygame.draw.circle(self.screen, base_color, (cx, cy), radius, width=3)
@@ -1707,9 +1801,6 @@ class SpiralGame:
 		if self.blocks_enabled() and self.block_button.collidepoint(pos):
 			self.try_purchase_block()
 			return
-		if self.bouncer_button.collidepoint(pos):
-			self.try_purchase_bouncer()
-			return
 		if self.portal_button.collidepoint(pos):
 			self.try_purchase_portal()
 			return
@@ -1721,6 +1812,9 @@ class SpiralGame:
 			return
 		if self.speed_boost_ui_visible() and self.speed_boost_button.collidepoint(pos):
 			self.try_activate_speed_boost()
+			return
+		if self.bouncepad_ui_visible() and self.bouncepad_button.collidepoint(pos):
+			self.try_activate_bouncepad()
 			return
 		play_min = SHOP_WIDTH + 20
 		play_max = WIDTH - UTILITY_WIDTH - 20
@@ -1797,10 +1891,12 @@ class SpiralGame:
 		self.turbo_purchases += 1
 		self.placing_turbo_pipe = TurboPipeItem(id=self.turbo_counter, cost=cost)
 
-	def try_purchase_bouncer(self) -> None:
+	def try_activate_bouncepad(self) -> None:
 		if not self.bouncer_enabled():
 			return
-		if self.bouncers or self.placing_bouncer:
+		if self.placing_bouncer:
+			return
+		if self.bouncepad_charges <= 0:
 			return
 		if (
 			self.placing_pipe
@@ -1810,13 +1906,10 @@ class SpiralGame:
 			or self.placing_storm
 		):
 			return
-		cost = self.next_bouncer_cost()
-		if self.coins < cost:
-			return
-		self.coins -= cost
+		self.bouncepad_charges = max(0, self.bouncepad_charges - 1)
 		self.bouncer_counter += 1
 		self.bouncer_purchases += 1
-		self.placing_bouncer = BouncerItem(id=self.bouncer_counter, cost=cost)
+		self.placing_bouncer = BouncerItem(id=self.bouncer_counter, cost=0)
 
 	def try_purchase_portal(self) -> None:
 		if not self.portal_enabled():
@@ -1871,16 +1964,18 @@ class SpiralGame:
 			self.add_coin_popup(pos, f"+{REMOVAL_BONUS}")
 
 	def try_remove_item_at(self, pos: Tuple[int, int]) -> bool:
-		removers = [
-			self.remove_pipe_at,
-			self.remove_block_at,
-			self.remove_turbo_pipe_at,
-			self.remove_bouncer_at,
-			self.remove_storm_at,
-			self.remove_portal_at,
-		]
-		for remover in removers:
+		removers = (
+			("pipe", self.remove_pipe_at),
+			("block", self.remove_block_at),
+			("turbo", self.remove_turbo_pipe_at),
+			("bouncer", self.remove_bouncer_at),
+			("storm", self.remove_storm_at),
+			("portal", self.remove_portal_at),
+		)
+		for kind, remover in removers:
 			if remover(pos):
+				if kind != "bouncer":
+					self.handle_tool_removed(kind)
 				return True
 		return False
 
@@ -2091,7 +2186,9 @@ class SpiralGame:
 		bouncer = self.placing_bouncer
 		bouncer.center = (int(x), int(y))
 		bouncer.progress = progress
-		self.bouncers = [bouncer]
+		bouncer.removals_remaining = BOUNCER_TRIGGER_REMOVALS
+		bouncer.ready_to_drop = False
+		self.bouncers.append(bouncer)
 		self.placing_bouncer = None
 		self.update_bouncer_supply()
 
@@ -2334,18 +2431,16 @@ class SpiralGame:
 	def update_bouncer_supply(self) -> None:
 		if not self.bouncers:
 			return
-		bouncer = self.bouncers[0]
-		if bouncer.triggered:
-			return
-		remaining = bouncer.required_pipes - len(self.pipes)
-		if remaining > 0:
-			return
-		self.spawn_bouncer_drops(bouncer)
-		bouncer.triggered = True
-		self.bouncers = []
+		triggered = [b for b in list(self.bouncers) if b.ready_to_drop or b.removals_remaining <= 0]
+		for bouncer in triggered:
+			if bouncer in self.bouncers:
+				self.bouncers.remove(bouncer)
+			self.spawn_bouncer_drops(bouncer)
 
 	def spawn_bouncer_drops(self, bouncer: BouncerItem) -> None:
-		drop_options = self.collectible_powerup_types()
+		drop_options = [
+			kind for kind in self.collectible_powerup_types() if kind != BOUNCEPAD_POWERUP_KIND
+		]
 		if not drop_options:
 			drop_options = ["speed_boost"]
 		count = random.randint(BOUNCER_DROP_MIN, BOUNCER_DROP_MAX)
@@ -2598,8 +2693,8 @@ class SpiralGame:
 					center=bouncer.center,
 					progress=bouncer.progress,
 					radius=bouncer.radius,
-					required_pipes=bouncer.required_pipes,
-					triggered=bouncer.triggered,
+					removals_remaining=bouncer.removals_remaining,
+					ready_to_drop=bouncer.ready_to_drop,
 				)
 			)
 		return clones
