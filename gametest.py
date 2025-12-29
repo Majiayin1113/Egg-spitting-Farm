@@ -880,8 +880,6 @@ class SpiralGame:
 			self.round_active = False
 			if self.round_result != "success":
 				self.round_result = "fail"
-				self.reset_round(1)
-				return ROUND_TIME
 		return remaining
 
 	def check_round_victory(self) -> None:
