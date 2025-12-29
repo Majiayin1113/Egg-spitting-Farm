@@ -451,6 +451,7 @@ class SpiralGame:
 			block_counter = self.block_counter
 			turbo_counter = self.turbo_counter
 			bouncer_counter = self.bouncer_counter
+			bouncer_purchases = getattr(self, "bouncer_purchases", 0)
 			storm_counter = self.storm_counter
 			portal_counter = self.portal_counter
 			portal_purchases = getattr(self, "portal_purchases", 0)
@@ -468,6 +469,7 @@ class SpiralGame:
 			block_counter = 0
 			turbo_counter = 0
 			bouncer_counter = 0
+			bouncer_purchases = 0
 			storm_counter = 0
 			portal_counter = 0
 			portal_purchases = 0
@@ -495,6 +497,7 @@ class SpiralGame:
 		self.placing_turbo_pipe = None
 		self.bouncers = preserved_bouncers
 		self.bouncer_counter = bouncer_counter
+		self.bouncer_purchases = bouncer_purchases
 		self.placing_bouncer = None
 		self.storm_emitters = preserved_storms
 		self.storm_counter = storm_counter
