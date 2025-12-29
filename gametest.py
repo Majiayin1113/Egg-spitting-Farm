@@ -34,7 +34,7 @@ LEVEL_CONFIG = {
 	3: {"target": 3000, "blocks": True},
 	4: {"target": 20000, "blocks": True},
 }
-PIPE_COST_SCHEDULE = [10, 20, 25, 40, 60,100,180,250,400]
+PIPE_COST_SCHEDULE = [10, 20, 25, 40, 60,180,250,400,600,800,1000,1500,2000,3000,5000]
 PIPE_HEIGHT = 180
 PIPE_SPEED = 1000
 BALL_RADIUS = 12
@@ -46,11 +46,11 @@ BLOCK_SLOW_FACTOR = 0.35
 BLOCK_BONUS = 2
 BLOCK_DURATION = 5.0
 BLOCK_COOLDOWN_DURATION = 30.0
-BLOCK_COOLDOWN_REDUCTION = 10.0
+BLOCK_COOLDOWN_REDUCTION_STEPS = [10.0, 5.0, 2.0, 1.0]
 BLOCK_UPGRADED_DURATION = 10.0
 BLOCK_ACTIVE_COLOR = (255, 140, 90)
 BLOCK_COOLDOWN_COLOR = (120, 90, 70)
-BLOCK_COST_SCHEDULE = [16, 25, 30, 38, 40, 50,80,100,120,150,200,250,300,400,500]
+BLOCK_COST_SCHEDULE = [16, 25, 30, 38, 40, 50,100,150,200,250,300,400,500,800,1000,1500]
 SPEED_BOOST_DURATION = 3.0
 SPEED_BOOST_FACTOR = 2.0
 SPEED_BOOST_COOLDOWN = 20.0
@@ -260,6 +260,7 @@ class BlockItem:
 	cooldown_duration: float = BLOCK_COOLDOWN_DURATION
 	cooldown_start_ms: int = 0
 	cooldown_end_ms: int = 0
+	upgrade_count: int = 0
 
 
 @dataclass
@@ -2035,7 +2036,13 @@ class SpiralGame:
 		block.active_duration = max(block.active_duration, BLOCK_UPGRADED_DURATION)
 		if block.is_active:
 			block.active_until_ms = block.spawn_ms + int(block.active_duration * 1000)
-		block.cooldown_duration = max(0.0, block.cooldown_duration - BLOCK_COOLDOWN_REDUCTION)
+		reduction_idx = block.upgrade_count
+		if reduction_idx < len(BLOCK_COOLDOWN_REDUCTION_STEPS):
+			reduction = BLOCK_COOLDOWN_REDUCTION_STEPS[reduction_idx]
+		else:
+			reduction = BLOCK_COOLDOWN_REDUCTION_STEPS[-1]
+		block.cooldown_duration = max(0.0, block.cooldown_duration - reduction)
+		block.upgrade_count += 1
 		if not block.is_active:
 			block.cooldown_end_ms = block.cooldown_start_ms + int(block.cooldown_duration * 1000)
 			if block.cooldown_end_ms <= now:
@@ -2543,6 +2550,7 @@ class SpiralGame:
 				radius=block.radius,
 				active_duration=block.active_duration,
 				cooldown_duration=block.cooldown_duration,
+				upgrade_count=block.upgrade_count,
 			)
 			self.activate_block(clone, now)
 			clones.append(clone)
