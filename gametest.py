@@ -32,7 +32,7 @@ LEVEL_CONFIG = {
 	1: {"target": 180, "blocks": False},
 	2: {"target": 300, "blocks": True},
 	3: {"target": 3000, "blocks": True},
-	4: {"target": 10000, "blocks": True},
+	4: {"target": 20000, "blocks": True},
 }
 PIPE_COST_SCHEDULE = [10, 20, 25, 40, 60,100,180,250,400]
 PIPE_HEIGHT = 180
