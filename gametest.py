@@ -548,7 +548,7 @@ class SpiralGame:
 		return PORTAL_COST * (2 ** self.portal_purchases)
 
 	def next_bouncer_cost(self) -> int:
-		return BOUNCER_COST
+		return BOUNCER_COST * (2 ** self.bouncer_purchases)
 
 	def next_storm_cost(self) -> int:
 		return STORM_ITEM_COST
@@ -1815,6 +1815,7 @@ class SpiralGame:
 			return
 		self.coins -= cost
 		self.bouncer_counter += 1
+		self.bouncer_purchases += 1
 		self.placing_bouncer = BouncerItem(id=self.bouncer_counter, cost=cost)
 
 	def try_purchase_portal(self) -> None:
