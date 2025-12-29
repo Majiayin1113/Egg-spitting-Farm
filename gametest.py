@@ -24,7 +24,7 @@ MACHINE_COLOR = (255, 180, 64)
 PANEL_COLOR = (24, 34, 52)
 PANEL_BORDER = (90, 110, 160)
 BALL_COLORS = [(255, 92, 138), (255, 214, 102), (130, 255, 173), (138, 189, 255)]
-TRACK_NODE_COUNT = 80
+TRACK_NODE_COUNT = 40
 
 SPAWN_INTERVAL = 0.3
 ROUND_TIME = 60
@@ -61,8 +61,8 @@ SKILL_BUTTON_HEIGHT = 56
 SKILL_PANEL_MARGIN = 16
 SKILL_INFO = {
 	"super_egg": {"title": "Lucky Egg", "desc": "Every 5th egg: Super Egg (+10 pts)"},
-	"coin_rain": {"title": "Coin Rain", "desc": "+10 coins/sec"},
-	"rapid_fire": {"title": "Rapid Nest", "desc": "Extra egg every 0.5s"},
+	"coin_rain": {"title": "Coin Rain", "desc": "+5 coins/sec"},
+	"rapid_fire": {"title": "Rapid Nest", "desc": "1 Extra egg every 0.5s"},
 }
 SKILL_COLORS = {
 	"super_egg": (90, 200, 150),
@@ -105,9 +105,9 @@ TOOLTIP_BORDER = (255, 255, 255)
 TOOLTIP_TEXT = (230, 240, 255)
 
 RAPID_FIRE_INTERVAL = 0.5
-TURBO_PIPE_COST_SCHEDULE = [25, 45, 60, 80, 110,250,300,500,1000,2000]
+TURBO_PIPE_COST_SCHEDULE = [25, 45, 80, 100,250,800,1500,5000]
 TURBO_PIPE_LENGTH = 0.05  # portion of the track covered
-TURBO_PIPE_MULTIPLIER = 1.5
+TURBO_PIPE_MULTIPLIER = 1.01
 TURBO_PIPE_COLOR = (255, 120, 40)
 
 BOUNCER_COST = 10
@@ -142,7 +142,6 @@ REMOVAL_POPUP_DURATION = 900  # milliseconds
 
 PORTAL_COST = 10
 PORTAL_ACTIVE_DURATION = 10.0
-PORTAL_FREEZE_DURATION = 30.0
 PORTAL_RADIUS = 26
 PORTAL_GLOW_COLOR = (130, 200, 255)
 PORTAL_BASE_COLOR = (30, 50, 90)
@@ -231,8 +230,8 @@ class Ball:
 	turbo_hits: set[int] = field(default_factory=set)
 	bonus_score: int = 0
 	score_value: int = 1
+	coin_value: int = 1
 	is_special: bool = False
-	portal_hits: set[int] = field(default_factory=set)
 
 
 @dataclass
@@ -409,11 +408,11 @@ class SpiralGame:
 		self.storm_emitters: List[StormItem] = []
 		self.placing_storm: Optional[StormItem] = None
 		self.portal_counter = 0
+		self.portal_purchases = 0
 		self.portals: List[PortalItem] = []
 		self.placing_portal: Optional[PortalItem] = None
 		self.portal_state: str = "inactive"
 		self.portal_active_until = 0
-		self.portal_freeze_until = 0
 		self.placing_pipe: Optional[PipeItem] = None
 		self.placing_block: Optional[BlockItem] = None
 		self.placing_turbo_pipe: Optional[TurboPipeItem] = None
@@ -451,6 +450,7 @@ class SpiralGame:
 			bouncer_counter = self.bouncer_counter
 			storm_counter = self.storm_counter
 			portal_counter = self.portal_counter
+			portal_purchases = getattr(self, "portal_purchases", 0)
 			pipe_purchases = getattr(self, "pipe_purchases", 0)
 			block_purchases = getattr(self, "block_purchases", 0)
 			turbo_purchases = getattr(self, "turbo_purchases", 0)
@@ -467,6 +467,7 @@ class SpiralGame:
 			bouncer_counter = 0
 			storm_counter = 0
 			portal_counter = 0
+			portal_purchases = 0
 			pipe_purchases = 0
 			block_purchases = 0
 			turbo_purchases = 0
@@ -497,10 +498,10 @@ class SpiralGame:
 		self.placing_storm = None
 		self.portals = preserved_portals
 		self.portal_counter = portal_counter
+		self.portal_purchases = portal_purchases
 		self.placing_portal = None
 		self.portal_state = "inactive"
 		self.portal_active_until = 0
-		self.portal_freeze_until = 0
 		self.speed_boost_unlocked = self.current_level >= ADVANCED_UNLOCK_LEVEL
 		self.speed_boost_active_until = 0
 		self.speed_boost_cooldown_until = 0
@@ -538,7 +539,7 @@ class SpiralGame:
 		return TURBO_PIPE_COST_SCHEDULE[idx]
 
 	def next_portal_cost(self) -> int:
-		return PORTAL_COST
+		return PORTAL_COST * (2 ** self.portal_purchases)
 
 	def next_bouncer_cost(self) -> int:
 		return BOUNCER_COST
@@ -779,6 +780,7 @@ class SpiralGame:
 			Ball(
 				color_index=color_index,
 				score_value=value,
+				coin_value=value,
 				is_special=special,
 			)
 		)
@@ -806,9 +808,10 @@ class SpiralGame:
 		if completed:
 			if self.round_active:
 				for fin in completed:
-					gain = fin.score_value + fin.bonus_score
-					self.score += gain
-					self.coins += gain
+					score_gain = fin.score_value + fin.bonus_score
+					coin_gain = fin.coin_value + fin.bonus_score
+					self.score += score_gain
+					self.coins += coin_gain
 					self.check_round_victory()
 			self.balls = [b for b in self.balls if b not in completed]
 
@@ -819,18 +822,17 @@ class SpiralGame:
 		remaining = max(0, ROUND_TIME - int(elapsed))
 		if remaining == 0 and self.round_active:
 			self.round_active = False
-			target = self.level_target()
-			self.round_result = "success" if self.score >= target else "fail"
+			if self.round_result != "success":
+				self.round_result = "fail"
 		return remaining
 
 	def check_round_victory(self) -> None:
-		if not self.round_active:
+		if self.round_result == "success":
 			return
 		target = self.level_target()
 		if target <= 0:
 			return
 		if self.score >= target:
-			self.round_active = False
 			self.round_result = "success"
 
 	def update(self, dt: float) -> None:
@@ -921,33 +923,34 @@ class SpiralGame:
 		self.screen.blit(goal_text, (rect.x + 14, rect.y + 104))
 
 		status_y = rect.bottom - 32
-		if not self.round_active:
-			if self.round_result == "fail":
-				fail_text = self.font_small.render(
-					"Press Space to retry", True, (255, 120, 120)
-				)
-				self.screen.blit(fail_text, (rect.x + 16, status_y))
+		if self.round_result == "success":
+			if self.current_level < self.max_level:
+				next_label = self.current_level + 1
+				msg = f"Press Enter for Lv {next_label}"
 			else:
-				if self.current_level < self.max_level:
-					next_label = self.current_level + 1
-					msg = f"Press Enter for Lv {next_label}"
-				else:
-					msg = "Press Enter to restart"
-				win_text = self.font_small.render(msg, True, (120, 255, 200))
-				self.screen.blit(win_text, (rect.x + 16, status_y))
+				msg = "Press Enter to restart"
+			win_text = self.font_small.render(msg, True, (120, 255, 200))
+			self.screen.blit(win_text, (rect.x + 16, status_y))
+		elif not self.round_active and self.round_result == "fail":
+			fail_text = self.font_small.render(
+				"Press Space to retry", True, (255, 120, 120)
+			)
+			self.screen.blit(fail_text, (rect.x + 16, status_y))
 
 	def draw_footer(self, remaining: int) -> None:
 		if self.round_start_ms is None and self.current_level >= ADVANCED_UNLOCK_LEVEL:
 			message = "Toggle passives, then press Confirm"
+		elif self.round_result == "success":
+			if self.current_level < self.max_level:
+				next_label = self.current_level + 1
+				message = f"Success! Press Enter for Level {next_label}"
+			else:
+				message = "All clear! Press Enter to restart"
 		elif not self.round_active:
 			if self.round_result == "fail":
 				message = "Goal missed. Press Space to retry"
 			else:
-				if self.current_level < self.max_level:
-					next_label = self.current_level + 1
-					message = f"Success! Press Enter for Level {next_label}"
-				else:
-					message = "All clear! Press Enter to restart"
+				message = "Catch every drop!"
 		else:
 			message = "Catch every drop!"
 		text = self.font_small.render(message, True, (200, 200, 210))
@@ -1329,20 +1332,15 @@ class SpiralGame:
 		elif len(self.portals) >= 2:
 			if self.portal_state == "active":
 				state_note = "Active"
-			elif self.portal_state == "frozen":
-				state_note = "Frozen"
 			else:
 				state_note = "Priming"
 		pygame.draw.rect(self.screen, btn_color, self.portal_button, border_radius=10)
 		pygame.draw.rect(self.screen, (255, 255, 255), self.portal_button, 2, border_radius=10)
 		self.draw_shop_cost(self.portal_button, cost)
 		self.draw_shop_icon(self.portal_button, "portal")
-		if len(self.portals) >= 2 and self.portal_state in {"active", "frozen"}:
+		if len(self.portals) >= 2 and self.portal_state == "active":
 			now = pygame.time.get_ticks()
-			if self.portal_state == "active":
-				remaining = max(0.0, (self.portal_active_until - now) / 1000.0)
-			else:
-				remaining = max(0.0, (self.portal_freeze_until - now) / 1000.0)
+			remaining = max(0.0, (self.portal_active_until - now) / 1000.0)
 			count_text = self.font_small.render(f"{remaining:0.1f}s", True, (12, 16, 25))
 			self.screen.blit(
 				count_text,
@@ -1565,22 +1563,13 @@ class SpiralGame:
 		for portal in self.portals:
 			cx, cy = portal.center
 			radius = portal.radius
-			if state == "active":
-				color = PORTAL_GLOW_COLOR
-			elif state == "frozen":
-				color = (90, 100, 130)
-			else:
-				color = (70, 90, 130)
+			color = PORTAL_GLOW_COLOR if state == "active" else (70, 90, 130)
 			outer_rect = pygame.Rect(0, 0, radius * 2, radius * 2)
 			outer_rect.center = (cx, cy)
 			pygame.draw.ellipse(self.screen, PORTAL_BASE_COLOR, outer_rect.inflate(10, 24), 2)
 			pygame.draw.circle(self.screen, color, (cx, cy), radius, width=3)
 			inner_radius = max(6, radius - 6)
 			pygame.draw.circle(self.screen, color, (cx, cy), inner_radius, width=1)
-			if state == "frozen":
-				freeze_text = self.font_small.render("Frozen", True, (200, 200, 230))
-				text_rect = freeze_text.get_rect(center=(cx, cy))
-				self.screen.blit(freeze_text, text_rect)
 
 	def draw_bouncers(self) -> None:
 		if not self.bouncers:
@@ -1659,13 +1648,13 @@ class SpiralGame:
 				elif event.type == pygame.KEYDOWN:
 					if event.key == pygame.K_ESCAPE:
 						running = False
-					if not self.round_active:
+					elif event.key == pygame.K_RETURN and self.round_result == "success":
+						next_level = self.current_level + 1 if self.current_level < self.max_level else 1
+						carry_layout = next_level > self.current_level
+						self.reset_round(next_level, carry_items=carry_layout)
+					elif not self.round_active:
 						if event.key == pygame.K_SPACE and self.round_result == "fail":
 							self.reset_round(self.current_level)
-						elif event.key == pygame.K_RETURN and self.round_result == "success":
-							next_level = self.current_level + 1 if self.current_level < self.max_level else 1
-							carry_layout = next_level > self.current_level
-							self.reset_round(next_level, carry_items=carry_layout)
 						elif event.key == pygame.K_r:
 							self.reset_round(1)
 				elif event.type == pygame.MOUSEBUTTONDOWN:
@@ -1835,6 +1824,7 @@ class SpiralGame:
 			return
 		self.coins -= cost
 		self.portal_counter += 1
+		self.portal_purchases += 1
 		self.placing_portal = PortalItem(id=self.portal_counter, cost=cost)
 
 	def try_purchase_storm(self) -> None:
@@ -1947,7 +1937,6 @@ class SpiralGame:
 				self.portals.remove(portal)
 				self.portal_state = "inactive"
 				self.portal_active_until = 0
-				self.portal_freeze_until = 0
 				return True
 		return False
 
@@ -2121,7 +2110,6 @@ class SpiralGame:
 			self.portals.sort(key=lambda item: item.progress)
 		self.portal_state = "inactive"
 		self.portal_active_until = 0
-		self.portal_freeze_until = 0
 
 	def ball_progress(self, ball: Ball) -> float:
 		if self.track_total <= 0:
@@ -2424,19 +2412,18 @@ class SpiralGame:
 			return
 		if ball.in_pipe:
 			return
-		ordered = sorted(self.portals[:2], key=lambda item: item.progress)
+		ordered = sorted(
+			self.portals[:2],
+			key=lambda item: item.center[1],
+			reverse=True,
+		)
 		entry_portal, exit_portal = ordered[0], ordered[1]
 		entry_distance = self.progress_to_distance(entry_portal.progress)
 		exit_distance = self.progress_to_distance(exit_portal.progress)
-		if exit_distance <= entry_distance:
-			return
-		if entry_portal.id in ball.portal_hits:
-			return
 		if not (ball.last_distance < entry_distance <= ball.distance):
 			return
-		ball.portal_hits.add(entry_portal.id)
 		teleport_distance = exit_distance + BALL_RADIUS * 1.5
-		ball.distance = max(ball.distance, teleport_distance)
+		ball.distance = teleport_distance
 		ball.last_distance = ball.distance
 		ball.speed = max(ball.speed, BALL_ACCEL * 0.1)
 
@@ -2481,12 +2468,12 @@ class SpiralGame:
 		ball.used_pipes.clear()
 		ball.block_hits.clear()
 		ball.turbo_hits.clear()
-		ball.portal_hits.clear()
 		for neighbor in self.balls:
 			if neighbor is ball:
 				continue
 			if abs(neighbor.distance - impact_distance) <= BOUNCER_NEIGHBOR_DISTANCE:
 				neighbor.score_value = ball.score_value
+				neighbor.coin_value = ball.coin_value
 		bouncer.armed = False
 		bouncer.passes_since_trigger = 0
 
@@ -2513,21 +2500,16 @@ class SpiralGame:
 		if len(self.portals) < 2:
 			self.portal_state = "inactive"
 			self.portal_active_until = 0
-			self.portal_freeze_until = 0
 			return
 		now = pygame.time.get_ticks()
-		if self.portal_state == "inactive":
+		if self.portal_state != "active":
 			self.portal_state = "active"
 			self.portal_active_until = now + int(PORTAL_ACTIVE_DURATION * 1000)
-			self.portal_freeze_until = 0
-		elif self.portal_state == "active":
-			if now >= self.portal_active_until:
-				self.portal_state = "frozen"
-				self.portal_freeze_until = now + int(PORTAL_FREEZE_DURATION * 1000)
-		elif self.portal_state == "frozen":
-			if now >= self.portal_freeze_until:
-				self.portal_state = "active"
-				self.portal_active_until = now + int(PORTAL_ACTIVE_DURATION * 1000)
+			return
+		if now >= self.portal_active_until:
+			self.portals.clear()
+			self.portal_state = "inactive"
+			self.portal_active_until = 0
 
 	def clone_pipes(self) -> List[PipeItem]:
 		"""Make deep copies of all placed pipes so layouts can persist."""
