@@ -57,7 +57,7 @@ SPEED_BOOST_COOLDOWN = 20.0
 SPECIAL_EGG_VALUE = 10
 SPECIAL_EGG_COLORS = ((255, 250, 160), (255, 110, 150))
 COIN_RAIN_RATE = 5
-SKILL_BUTTON_HEIGHT = 56
+SKILL_BUTTON_HEIGHT = 32
 SKILL_PANEL_MARGIN = 16
 SKILL_INFO = {
 	"super_egg": {"title": "Lucky Egg", "desc": "Every 5th egg: Super Egg (+10 pts)"},
@@ -357,9 +357,10 @@ class SpiralGame:
 		self.turbo_button = pygame.Rect(20, self.portal_button.bottom + button_gap, button_width, button_height)
 		self.utility_rect = pygame.Rect(WIDTH - UTILITY_WIDTH, 0, UTILITY_WIDTH, HEIGHT)
 		ability_width = self.utility_rect.width - 40
+		speed_boost_top = self.utility_rect.y + 40
 		self.speed_boost_button = pygame.Rect(
 			self.utility_rect.x + 20,
-			140,
+			speed_boost_top,
 			ability_width,
 			120,
 		)
@@ -389,8 +390,8 @@ class SpiralGame:
 		)
 		icon_size = SKILL_BUTTON_HEIGHT
 		btn_x = self.skill_panel_rect.centerx - icon_size // 2
-		btn_y = self.skill_panel_rect.y + 80
-		skill_spacing = icon_size + 12
+		btn_y = self.skill_panel_rect.y + 52
+		skill_spacing = icon_size + 8
 		self.skill_buttons = {
 			"super_egg": pygame.Rect(btn_x, btn_y, icon_size, icon_size),
 			"coin_rain": pygame.Rect(btn_x, btn_y + skill_spacing, icon_size, icon_size),
@@ -584,7 +585,7 @@ class SpiralGame:
 		return self.current_level >= 3
 
 	def portal_enabled(self) -> bool:
-		return True
+		return self.current_level >= 3
 
 	def pending_bouncer_target(self) -> Optional[BouncerItem]:
 		for bouncer in self.bouncers:
@@ -1039,8 +1040,10 @@ class SpiralGame:
 
 		if self.blocks_enabled():
 			self.draw_block_button()
-		self.draw_portal_button()
-		self.draw_turbo_button()
+		if self.portal_enabled():
+			self.draw_portal_button()
+		if self.turbo_enabled():
+			self.draw_turbo_button()
 
 	def draw_power_bar(self) -> None:
 		pygame.draw.rect(self.screen, (18, 26, 41), self.utility_rect)
@@ -1053,8 +1056,6 @@ class SpiralGame:
 		)
 		title = self.font_small.render("Abilities", True, (255, 255, 255))
 		self.screen.blit(title, (self.utility_rect.x + 20, 20))
-		tip = self.font_small.render("Quick boosts", True, (150, 180, 210))
-		self.screen.blit(tip, (self.utility_rect.x + 20, 50))
 
 		if self.speed_boost_ui_visible():
 			btn_color = (70, 160, 140)
@@ -1292,7 +1293,7 @@ class SpiralGame:
 			self.screen.blit(locked, (panel.x + 12, panel.y + 70))
 			return
 		awaiting_choice = self.skill_selection_required
-		icon_padding = 6
+		icon_padding = 4
 		for key in self.available_skill_keys():
 			rect = self.skill_buttons.get(key)
 			if rect is None:
@@ -1321,7 +1322,7 @@ class SpiralGame:
 			state_label = "Active" if selected else ("Equip" if awaiting_choice else "Passive")
 			state_color = (140, 255, 210) if selected else (180, 200, 220)
 			state_surface = self.font_small.render(state_label, True, state_color)
-			state_rect = state_surface.get_rect(center=(rect.centerx, rect.bottom + 12))
+			state_rect = state_surface.get_rect(center=(rect.centerx, rect.bottom + 8))
 			self.screen.blit(state_surface, state_rect)
 			tooltip_info = {
 				"title": info.get("title", key.title()),
@@ -1436,7 +1437,7 @@ class SpiralGame:
 			state_note = "Click map to set"
 		elif not self.portal_enabled():
 			btn_color = (45, 55, 80)
-			state_note = "Locked"
+			state_note = "Unlocks at Level 3"
 		elif self.coins < cost:
 			btn_color = (55, 65, 95)
 		elif len(self.portals) == 1:
@@ -1817,10 +1818,10 @@ class SpiralGame:
 		if self.blocks_enabled() and self.block_button.collidepoint(pos):
 			self.try_purchase_block()
 			return
-		if self.portal_button.collidepoint(pos):
+		if self.portal_enabled() and self.portal_button.collidepoint(pos):
 			self.try_purchase_portal()
 			return
-		if self.turbo_button.collidepoint(pos):
+		if self.turbo_enabled() and self.turbo_button.collidepoint(pos):
 			self.try_purchase_turbo_pipe()
 			return
 		if self.storm_ui_visible() and self.storm_button.collidepoint(pos):
