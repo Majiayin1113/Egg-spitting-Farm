@@ -153,7 +153,8 @@ PORTAL_COOLDOWN_DURATION = 40.0
 PORTAL_COOLDOWN_REDUCTION = 10.0
 PORTAL_INFUSION_RANGE = PORTAL_RADIUS + 14
 
-ADVANCED_UNLOCK_LEVEL = 2  # Level where passives and boosts become available
+ADVANCED_UNLOCK_LEVEL = 2  # Level where advanced abilities (e.g., speed boost) unlock
+PASSIVE_UNLOCK_LEVEL = 1  # Level where the passive skill picker becomes available
 
 
 def build_z_path(
@@ -529,7 +530,7 @@ class SpiralGame:
 		self.speed_boost_active_until = 0
 		self.speed_boost_cooldown_until = 0
 		self.active_skills = set()
-		self.skill_selection_required = self.current_level >= ADVANCED_UNLOCK_LEVEL
+		self.skill_selection_required = self.current_level >= PASSIVE_UNLOCK_LEVEL
 		self.skill_coin_timer = 0.0
 		self.rapid_fire_timer = 0.0
 		self.skill_modal_buttons = {}
@@ -650,7 +651,10 @@ class SpiralGame:
 		return types
 
 	def available_skill_keys(self) -> List[str]:
-		keys = ["super_egg", "coin_rain"]
+		keys: List[str] = []
+		if self.current_level >= 2:
+			keys.append("super_egg")
+		keys.append("coin_rain")
 		if self.current_level >= 3:
 			keys.append("rapid_fire")
 		return keys
@@ -789,7 +793,7 @@ class SpiralGame:
 		self.speed_boost_charges = max(0, self.speed_boost_charges - 1)
 
 	def skill_status_text(self) -> str:
-		if self.current_level < ADVANCED_UNLOCK_LEVEL:
+		if self.current_level < PASSIVE_UNLOCK_LEVEL:
 			return "Passive: Locked"
 		if self.active_skills:
 			titles = [
@@ -803,7 +807,7 @@ class SpiralGame:
 		return "Passive: None"
 
 	def handle_skill_selection_click(self, pos: Tuple[int, int]) -> bool:
-		if self.current_level < ADVANCED_UNLOCK_LEVEL or not self.skill_selection_required:
+		if self.current_level < PASSIVE_UNLOCK_LEVEL or not self.skill_selection_required:
 			return False
 		buttons = self.skill_modal_buttons or self.skill_buttons
 		allowed = set(self.available_skill_keys())
@@ -997,7 +1001,7 @@ class SpiralGame:
 			self.screen.blit(fail_text, (rect.x + 16, status_y))
 
 	def draw_footer(self, remaining: int) -> None:
-		if self.round_start_ms is None and self.current_level >= ADVANCED_UNLOCK_LEVEL:
+		if self.round_start_ms is None and self.current_level >= PASSIVE_UNLOCK_LEVEL:
 			message = "Toggle passives, then press Confirm"
 		elif self.round_result == "success":
 			if self.current_level < self.max_level:
@@ -1284,12 +1288,12 @@ class SpiralGame:
 		pygame.draw.rect(self.screen, PANEL_BORDER, panel, 2, border_radius=12)
 		title = self.font_small.render("Passive Skills", True, (255, 255, 255))
 		self.screen.blit(title, (panel.x + 12, panel.y + 10))
-		unlock_short = f"Lv{ADVANCED_UNLOCK_LEVEL}"
+		unlock_short = f"Lv{PASSIVE_UNLOCK_LEVEL}"
 		desc = self.font_small.render(f"Select before {unlock_short}", True, (150, 180, 210))
 		self.screen.blit(desc, (panel.x + 12, panel.y + 34))
-		if self.current_level < ADVANCED_UNLOCK_LEVEL:
+		if self.current_level < PASSIVE_UNLOCK_LEVEL:
 			locked = self.font_small.render(
-				f"Unlocks at Level {ADVANCED_UNLOCK_LEVEL}", True, (255, 180, 120)
+				f"Unlocks at Level {PASSIVE_UNLOCK_LEVEL}", True, (255, 180, 120)
 			)
 			self.screen.blit(locked, (panel.x + 12, panel.y + 70))
 			return
@@ -1338,7 +1342,7 @@ class SpiralGame:
 			)
 
 	def draw_skill_overlay(self) -> None:
-		if self.current_level < ADVANCED_UNLOCK_LEVEL or not self.skill_selection_required:
+		if self.current_level < PASSIVE_UNLOCK_LEVEL or not self.skill_selection_required:
 			self.skill_modal_buttons = {}
 			self.skill_confirm_button = None
 			return
@@ -1355,7 +1359,7 @@ class SpiralGame:
 		title = self.font_large.render("Select Your Passive", True, (255, 255, 255))
 		self.screen.blit(title, (panel_rect.centerx - title.get_width() // 2, panel_rect.y + 20))
 		sub = self.font_small.render(
-			f"Toggle any perks before Level {ADVANCED_UNLOCK_LEVEL} begins",
+			f"Toggle any perks before Level {PASSIVE_UNLOCK_LEVEL} begins",
 			True,
 			(180, 220, 255),
 		)
@@ -1607,10 +1611,7 @@ class SpiralGame:
 		locked_note: Optional[str] = None,
 		info_override: Optional[Dict[str, str]] = None,
 	) -> None:
-		if (
-			self.current_level >= ADVANCED_UNLOCK_LEVEL
-			and self.skill_selection_required
-		):
+		if self.current_level >= PASSIVE_UNLOCK_LEVEL and self.skill_selection_required:
 			return
 		mouse_pos = pygame.mouse.get_pos()
 		if not rect.collidepoint(mouse_pos):
@@ -1808,7 +1809,7 @@ class SpiralGame:
 		pygame.quit()
 
 	def handle_click(self, pos: Tuple[int, int]) -> None:
-		if self.current_level >= ADVANCED_UNLOCK_LEVEL and self.skill_selection_required:
+		if self.current_level >= PASSIVE_UNLOCK_LEVEL and self.skill_selection_required:
 			self.handle_skill_selection_click(pos)
 			return
 		if self.handle_skill_selection_click(pos):
@@ -1973,7 +1974,7 @@ class SpiralGame:
 		self.placing_storm = StormItem(id=self.storm_counter, cost=cost)
 
 	def handle_right_click(self, pos: Tuple[int, int]) -> None:
-		if self.current_level >= ADVANCED_UNLOCK_LEVEL and self.skill_selection_required:
+		if self.current_level >= PASSIVE_UNLOCK_LEVEL and self.skill_selection_required:
 			return
 		if not (SHOP_WIDTH + 20 < pos[0] < WIDTH - UTILITY_WIDTH - 20):
 			return
