@@ -25,6 +25,7 @@ PANEL_COLOR = (24, 34, 52)
 PANEL_BORDER = (90, 110, 160)
 BALL_COLORS = [(255, 92, 138), (255, 214, 102), (130, 255, 173), (138, 189, 255)]
 TRACK_NODE_COUNT = 40
+TRACK_POINT_TOLERANCE = 1e-4
 
 SPAWN_INTERVAL = 0.3
 ROUND_TIME = 60
@@ -2116,6 +2117,8 @@ class SpiralGame:
 			return
 		x, y, progress = self.nearest_point_on_track(pos)
 		x, y, progress = self.snap_progress_point(progress)
+		if self.track_point_occupied(progress):
+			return
 		block = self.placing_block
 		block.pos = (x, y)
 		block.progress = progress
@@ -2188,6 +2191,8 @@ class SpiralGame:
 		start_node, end_node = self.snap_progress_span(start_prog, end_prog)
 		start_prog = start_node[2]
 		end_prog = end_node[2]
+		if self.track_span_occupied(start_prog, end_prog):
+			return
 		turbo = self.placing_turbo_pipe
 		turbo.start_progress = start_prog
 		turbo.end_progress = end_prog
@@ -2201,6 +2206,8 @@ class SpiralGame:
 			return
 		x, y, progress = self.nearest_point_on_track(pos)
 		x, y, progress = self.snap_progress_point(progress)
+		if self.track_point_occupied(progress):
+			return
 		bouncer = self.placing_bouncer
 		bouncer.center = (int(x), int(y))
 		bouncer.progress = progress
@@ -2215,6 +2222,8 @@ class SpiralGame:
 			return
 		x, y, progress = self.nearest_point_on_track(pos)
 		x, y, progress = self.snap_progress_point(progress)
+		if self.track_point_occupied(progress):
+			return
 		storm = self.placing_storm
 		storm.center = (int(x), int(y))
 		storm.progress = progress
@@ -2237,6 +2246,8 @@ class SpiralGame:
 		if self.portal_state == "cooldown" and len(self.portals) >= 2:
 			if self.try_accelerate_portal_cooldown(target_point):
 				self.placing_portal = None
+			return
+		if self.track_point_occupied(progress):
 			return
 		portal = self.placing_portal
 		portal.center = target_point
@@ -2374,6 +2385,36 @@ class SpiralGame:
 		idx = self.closest_track_node_index(progress)
 		x, y, snapped = self.track_nodes[idx]
 		return x, y, snapped
+
+	def track_point_occupied(self, progress: float) -> bool:
+		"""Return True when any placed tool already uses this snapped track progress."""
+		return self.track_span_occupied(progress, progress)
+
+	def track_span_occupied(self, start_prog: float, end_prog: float) -> bool:
+		start = max(0.0, min(start_prog, end_prog)) - TRACK_POINT_TOLERANCE
+		end = min(1.0, max(start_prog, end_prog)) + TRACK_POINT_TOLERANCE
+		start = max(0.0, start)
+		end = min(1.0, end)
+		def span_contains(value: float) -> bool:
+			return start <= value <= end
+		for block in self.blocks:
+			if span_contains(block.progress):
+				return True
+		for bouncer in self.bouncers:
+			if span_contains(bouncer.progress):
+				return True
+		for storm in self.storm_emitters:
+			if span_contains(storm.progress):
+				return True
+		for portal in self.portals:
+			if span_contains(portal.progress):
+				return True
+		for turbo in self.turbo_pipes:
+			turbo_start = min(turbo.start_progress, turbo.end_progress)
+			turbo_end = max(turbo.start_progress, turbo.end_progress)
+			if turbo_start <= end and turbo_end >= start:
+				return True
+		return False
 
 	def snap_progress_span(
 		self,
