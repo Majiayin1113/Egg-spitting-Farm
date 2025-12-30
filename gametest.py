@@ -2100,7 +2100,7 @@ class SpiralGame:
 		pipe_width = rect.width
 		pipe_x = rect.centerx
 		visual_top = min(entry_y, exit_y)
-		visual_height = max(20, abs(exit_y - entry_y) + 20)
+		visual_height = max(20, abs(exit_y - entry_y) + 12)
 		snapped_rect = pygame.Rect(0, 0, pipe_width, int(visual_height))
 		snapped_rect.midtop = (int(pipe_x), int(visual_top))
 		pipe.rect = snapped_rect
