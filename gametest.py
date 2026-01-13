@@ -35,9 +35,6 @@ LEVEL_CONFIG = {
 	3: {"target": 3000, "blocks": True},
 	4: {"target": 20000, "blocks": True},
 }
-PIPE_COST_SCHEDULE = [10, 20, 25, 40, 60,180,250,400,600,800,1000,1500,2000,3000,5000]
-PIPE_HEIGHT = 180
-PIPE_SPEED = 1000
 BALL_RADIUS = 12
 # Speeds now expressed in pixels/sec to match physical distance model
 BALL_ACCEL = 180.0
@@ -72,10 +69,6 @@ SKILL_COLORS = {
 }
 
 SHOP_ITEM_DETAILS = {
-	"pipe": {
-		"title": "Vertical Pipe",
-		"desc": "Drop eggs through a short chute to skip ahead on the trail.",
-	},
 	"block": {
 		"title": "Slow Block",
 		"desc": "Place on the path to slow eggs and add bonus score.",
@@ -229,29 +222,12 @@ class Ball:
 	distance: float = 0.0
 	last_distance: float = 0.0
 	speed: float = 0.0
-	in_pipe: bool = False
-	pipe_y: float = 0.0
-	pipe_x: float = 0.0
-	pipe_id: Optional[int] = None
-	used_pipes: set[int] = field(default_factory=set)
 	block_hits: set[int] = field(default_factory=set)
 	turbo_hits: set[int] = field(default_factory=set)
 	bonus_score: int = 0
 	score_value: int = 1
 	coin_value: int = 1
 	is_special: bool = False
-
-
-@dataclass
-class PipeItem:
-	id: int = 0
-	cost: int = 0
-	rect: Optional[pygame.Rect] = None
-	entry_progress: float = 0.0
-	exit_progress: float = 0.0
-	entry_y: float = 0.0
-	exit_y: float = 0.0
-	x: float = 0.0
 
 
 @dataclass
@@ -333,7 +309,7 @@ class CoinPopup:
 
 
 class SpiralGame:
-	def __init__(self, start_level: int = 1) -> None:
+	def __init__(self, start_level: int = 2) -> None:
 		pygame.init()
 		pygame.display.set_caption("Z-Trail Drop")
 		self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
@@ -353,8 +329,7 @@ class SpiralGame:
 		button_height = 80
 		button_gap = 16
 		first_y = 120
-		self.pipe_button = pygame.Rect(20, first_y, button_width, button_height)
-		self.block_button = pygame.Rect(20, self.pipe_button.bottom + button_gap, button_width, button_height)
+		self.block_button = pygame.Rect(20, first_y, button_width, button_height)
 		self.portal_button = pygame.Rect(20, self.block_button.bottom + button_gap, button_width, button_height)
 		self.turbo_button = pygame.Rect(20, self.portal_button.bottom + button_gap, button_width, button_height)
 		self.utility_rect = pygame.Rect(WIDTH - UTILITY_WIDTH, 0, UTILITY_WIDTH, HEIGHT)
@@ -409,11 +384,8 @@ class SpiralGame:
 		self.powerup_spawn_timer = 0.0
 		self.powerup_spawn_delay = self.next_powerup_delay()
 		self.coin_popups: List[CoinPopup] = []
-		self.pipe_counter = 0
-		self.pipe_purchases = 0
 		self.block_counter = 0
 		self.block_purchases = 0
-		self.pipes: List[PipeItem] = []
 		self.blocks: List[BlockItem] = []
 		self.turbo_counter = 0
 		self.turbo_purchases = 0
@@ -432,9 +404,6 @@ class SpiralGame:
 		self.portal_state: str = "inactive"
 		self.portal_active_until = 0
 		self.portal_cooldown_until = 0
-		self.placing_pipe: Optional[PipeItem] = None
-		self.placing_block: Optional[BlockItem] = None
-		self.placing_turbo_pipe: Optional[TurboPipeItem] = None
 		self.speed_boost_active_until = 0
 		self.speed_boost_cooldown_until = 0
 		self.speed_boost_unlocked = False
@@ -458,13 +427,11 @@ class SpiralGame:
 		if level is not None:
 			self.current_level = max(1, min(level, self.max_level))
 		if carry_items:
-			preserved_pipes = self.clone_pipes()
 			preserved_blocks = self.clone_blocks()
 			preserved_turbos = self.clone_turbo_pipes()
 			preserved_bouncers = self.clone_bouncers()
 			preserved_storms = self.clone_storm_emitters()
 			preserved_portals = self.clone_portals()
-			pipe_counter = self.pipe_counter
 			block_counter = self.block_counter
 			turbo_counter = self.turbo_counter
 			bouncer_counter = self.bouncer_counter
@@ -472,17 +439,14 @@ class SpiralGame:
 			storm_counter = self.storm_counter
 			portal_counter = self.portal_counter
 			portal_purchases = getattr(self, "portal_purchases", 0)
-			pipe_purchases = getattr(self, "pipe_purchases", 0)
 			block_purchases = getattr(self, "block_purchases", 0)
 			turbo_purchases = getattr(self, "turbo_purchases", 0)
 		else:
-			preserved_pipes = []
 			preserved_blocks = []
 			preserved_turbos = []
 			preserved_bouncers = []
 			preserved_storms = []
 			preserved_portals = []
-			pipe_counter = 0
 			block_counter = 0
 			turbo_counter = 0
 			bouncer_counter = 0
@@ -490,7 +454,6 @@ class SpiralGame:
 			storm_counter = 0
 			portal_counter = 0
 			portal_purchases = 0
-			pipe_purchases = 0
 			block_purchases = 0
 			turbo_purchases = 0
 		self.balls: List[Ball] = []
@@ -500,10 +463,6 @@ class SpiralGame:
 		self.round_start_ms: Optional[int] = None
 		self.round_active = True
 		self.round_result: Optional[str] = None
-		self.pipes = preserved_pipes
-		self.placing_pipe = None
-		self.pipe_counter = pipe_counter
-		self.pipe_purchases = pipe_purchases
 		self.blocks = preserved_blocks
 		self.block_counter = block_counter
 		self.block_purchases = block_purchases
@@ -550,10 +509,6 @@ class SpiralGame:
 	def start_round_clock(self) -> None:
 		if self.round_start_ms is None:
 			self.round_start_ms = pygame.time.get_ticks()
-
-	def next_pipe_cost(self) -> int:
-		idx = min(self.pipe_purchases, len(PIPE_COST_SCHEDULE) - 1)
-		return PIPE_COST_SCHEDULE[idx]
 
 	def next_block_cost(self) -> int:
 		idx = min(self.block_purchases, len(BLOCK_COST_SCHEDULE) - 1)
@@ -730,7 +685,7 @@ class SpiralGame:
 		self.track_powerups = [item for item in self.track_powerups if item.id != powerup.id]
 
 	def check_powerup_collision(self, ball: Ball) -> None:
-		if not self.track_powerups or ball.in_pipe:
+		if not self.track_powerups:
 			return
 		collected: List[TrackPowerup] = []
 		for powerup in self.track_powerups:
@@ -853,18 +808,13 @@ class SpiralGame:
 		multiplier = self.speed_boost_multiplier()
 		for ball in self.balls:
 			ball.last_distance = ball.distance
-			if self.apply_pipe(ball, dt):
-				continue
 			ball.speed = min(ball.speed + BALL_ACCEL * multiplier * dt, BALL_MAX_SPEED)
 			ball.distance += (ball.speed * multiplier) * dt
-			if not ball.in_pipe:
-				self.apply_turbo_effects(ball, dt, multiplier)
-				self.apply_block_effects(ball)
-				self.apply_portal_effects(ball)
-				self.check_powerup_collision(ball)
-				self.process_storm_pass(ball)
-			if self.apply_pipe(ball, dt):
-				continue
+			self.apply_turbo_effects(ball, dt, multiplier)
+			self.apply_block_effects(ball)
+			self.apply_portal_effects(ball)
+			self.check_powerup_collision(ball)
+			self.process_storm_pass(ball)
 			if ball.distance >= self.track_total:
 				completed.append(ball)
 		if completed:
@@ -924,9 +874,6 @@ class SpiralGame:
 				(int(node_x), int(node_y)),
 				TRACK_NODE_RADIUS,
 			)
-		for pipe in self.pipes:
-			if pipe.rect:
-				pygame.draw.rect(self.screen, (255, 255, 255), pipe.rect, border_radius=6)
 		self.draw_track_powerups()
 		self.draw_portals()
 		self.draw_storm_emitters()
@@ -944,15 +891,12 @@ class SpiralGame:
 
 	def draw_balls(self) -> None:
 		for ball in self.balls:
-			if ball.in_pipe:
-				x, y = ball.pipe_x, ball.pipe_y
-			else:
-				x, y = lerp_point(
-					self.track_points,
-					self.track_lengths,
-					self.track_total,
-					self.ball_progress(ball),
-				)
+			x, y = lerp_point(
+				self.track_points,
+				self.track_lengths,
+				self.track_total,
+				self.ball_progress(ball),
+			)
 			if ball.is_special:
 				outer, inner = SPECIAL_EGG_COLORS
 				pygame.draw.circle(self.screen, outer, (int(x), int(y)), BALL_RADIUS)
@@ -1031,24 +975,19 @@ class SpiralGame:
 		info = self.font_small.render("Hover for details", True, (150, 180, 210))
 		self.screen.blit(info, (20, 50))
 
-		current_cost = self.next_pipe_cost()
-		btn_color = (70, 120, 200)
-		if self.placing_pipe:
-			btn_color = (200, 180, 80)
-		elif self.coins < current_cost:
-			btn_color = (45, 60, 90)
-		pygame.draw.rect(self.screen, btn_color, self.pipe_button, border_radius=10)
-		pygame.draw.rect(self.screen, (255, 255, 255), self.pipe_button, 2, border_radius=10)
-		self.draw_shop_cost(self.pipe_button, current_cost)
-		self.draw_shop_icon(self.pipe_button, "pipe")
-		self.queue_shop_tooltip("pipe", self.pipe_button)
-
+		any_button = False
 		if self.blocks_enabled():
 			self.draw_block_button()
+			any_button = True
 		if self.portal_enabled():
 			self.draw_portal_button()
+			any_button = True
 		if self.turbo_enabled():
 			self.draw_turbo_button()
+			any_button = True
+		if not any_button:
+			locked = self.font_small.render("Tools unlock later", True, (150, 180, 210))
+			self.screen.blit(locked, (20, 120))
 
 	def draw_power_bar(self) -> None:
 		pygame.draw.rect(self.screen, (18, 26, 41), self.utility_rect)
@@ -1528,14 +1467,7 @@ class SpiralGame:
 		pygame.draw.rect(self.screen, bg, icon_rect, border_radius=10)
 		pygame.draw.rect(self.screen, (255, 255, 255), icon_rect, 2, border_radius=10)
 		inner = icon_rect.inflate(-12, -12)
-		if icon_type == "pipe":
-			pipe_rect = pygame.Rect(0, 0, inner.width // 2, inner.height)
-			pipe_rect.center = inner.center
-			pygame.draw.rect(self.screen, (255, 255, 255), pipe_rect, border_radius=4)
-			cap = pygame.Rect(0, 0, pipe_rect.width + 6, 6)
-			cap.midbottom = pipe_rect.midtop
-			pygame.draw.rect(self.screen, (255, 200, 120), cap, border_radius=3)
-		elif icon_type == "block":
+		if icon_type == "block":
 			square = inner.copy()
 			pygame.draw.rect(self.screen, BLOCK_ACTIVE_COLOR, square, border_radius=6)
 			pygame.draw.rect(self.screen, (255, 255, 255), square, 2, border_radius=6)
@@ -1814,9 +1746,6 @@ class SpiralGame:
 			return
 		if self.handle_skill_selection_click(pos):
 			return
-		if self.pipe_button.collidepoint(pos):
-			self.try_purchase_pipe()
-			return
 		if self.blocks_enabled() and self.block_button.collidepoint(pos):
 			self.try_purchase_block()
 			return
@@ -1837,9 +1766,7 @@ class SpiralGame:
 			return
 		play_min = SHOP_WIDTH + 20
 		play_max = WIDTH - UTILITY_WIDTH - 20
-		if self.placing_pipe and play_min < pos[0] < play_max:
-			self.place_pipe(pos)
-		elif self.placing_block and play_min < pos[0] < play_max:
+		if self.placing_block and play_min < pos[0] < play_max:
 			if self.try_upgrade_block(pos):
 				return
 			self.place_block(pos)
@@ -1852,30 +1779,11 @@ class SpiralGame:
 		elif self.placing_portal and play_min < pos[0] < play_max:
 			self.place_portal(pos)
 
-	def try_purchase_pipe(self) -> None:
-		if (
-			self.placing_pipe
-			or self.placing_block
-			or self.placing_turbo_pipe
-			or self.placing_bouncer
-			or self.placing_storm
-			or self.placing_portal
-		):
-			return
-		cost = self.next_pipe_cost()
-		if self.coins < cost:
-			return
-		self.coins -= cost
-		self.pipe_counter += 1
-		self.pipe_purchases += 1
-		self.placing_pipe = PipeItem(id=self.pipe_counter, cost=cost)
-
 	def try_purchase_block(self) -> None:
 		if not self.blocks_enabled():
 			return
 		if (
 			self.placing_block
-			or self.placing_pipe
 			or self.placing_turbo_pipe
 			or self.placing_bouncer
 			or self.placing_storm
@@ -1895,7 +1803,6 @@ class SpiralGame:
 			return
 		if (
 			self.placing_turbo_pipe
-			or self.placing_pipe
 			or self.placing_block
 			or self.placing_bouncer
 			or self.placing_storm
@@ -1918,8 +1825,7 @@ class SpiralGame:
 		if self.bouncepad_charges <= 0:
 			return
 		if (
-			self.placing_pipe
-			or self.placing_block
+			self.placing_block
 			or self.placing_turbo_pipe
 			or self.placing_portal
 			or self.placing_storm
@@ -1936,8 +1842,7 @@ class SpiralGame:
 		if self.placing_portal:
 			return
 		if (
-			self.placing_pipe
-			or self.placing_block
+			self.placing_block
 			or self.placing_turbo_pipe
 			or self.placing_bouncer
 			or self.placing_storm
@@ -1961,8 +1866,7 @@ class SpiralGame:
 		if self.storm_charges <= 0:
 			return
 		if (
-			self.placing_pipe
-			or self.placing_block
+			self.placing_block
 			or self.placing_turbo_pipe
 			or self.placing_bouncer
 			or self.placing_portal
@@ -1984,7 +1888,6 @@ class SpiralGame:
 
 	def try_remove_item_at(self, pos: Tuple[int, int]) -> bool:
 		removers = (
-			("pipe", self.remove_pipe_at),
 			("block", self.remove_block_at),
 			("turbo", self.remove_turbo_pipe_at),
 			("bouncer", self.remove_bouncer_at),
@@ -1995,18 +1898,6 @@ class SpiralGame:
 			if remover(pos):
 				if kind != "bouncer":
 					self.handle_tool_removed(kind)
-				return True
-		return False
-
-	def remove_pipe_at(self, pos: Tuple[int, int]) -> bool:
-		if not self.pipes:
-			return False
-		for pipe in reversed(self.pipes):
-			if not pipe.rect:
-				continue
-			inflated = pipe.rect.inflate(20, 20)
-			if inflated.collidepoint(pos):
-				self.pipes.remove(pipe)
 				return True
 		return False
 
@@ -2068,50 +1959,6 @@ class SpiralGame:
 				self.portal_cooldown_until = 0
 				return True
 		return False
-
-	def place_pipe(self, pos: Tuple[int, int]) -> None:
-		if not self.placing_pipe:
-			return
-		x = max(SHOP_WIDTH + 80, min(WIDTH - UTILITY_WIDTH - 80, pos[0]))
-		intersections = self.track_intersections_at_x(x)
-		if len(intersections) < 2:
-			up = max(120, pos[1] - PIPE_HEIGHT // 2)
-			up = min(HEIGHT - PIPE_HEIGHT - 60, up)
-			rect = pygame.Rect(0, 0, 26, PIPE_HEIGHT)
-			rect.center = (x, up + PIPE_HEIGHT // 2)
-			entry_prog, exit_prog = self.pipe_progress_from_rect(rect)
-			entry_y = rect.top + 10
-			exit_y = rect.bottom - 10
-		else:
-			pair = self.pick_intersection_pair(intersections, pos[1])
-			top = intersections[pair[0]]
-			bottom = intersections[pair[1]]
-			top_y, top_prog, _ = top
-			bottom_y, bottom_prog, _ = bottom
-			height = max(20, bottom_y - top_y)
-			rect = pygame.Rect(0, 0, 26, height)
-			rect.midtop = (x, top_y)
-			entry_prog, exit_prog = top_prog, bottom_prog
-			entry_y, exit_y = top_y, bottom_y
-		start_node, end_node = self.snap_progress_span(entry_prog, exit_prog)
-		_, entry_y, entry_prog = start_node
-		_, exit_y, exit_prog = end_node
-		pipe = self.placing_pipe
-		pipe_width = rect.width
-		pipe_x = rect.centerx
-		visual_top = min(entry_y, exit_y)
-		visual_height = max(20, abs(exit_y - entry_y) + 12)
-		snapped_rect = pygame.Rect(0, 0, pipe_width, int(visual_height))
-		snapped_rect.midtop = (int(pipe_x), int(visual_top))
-		pipe.rect = snapped_rect
-		pipe.entry_progress = entry_prog
-		pipe.exit_progress = exit_prog
-		pipe.entry_y = entry_y
-		pipe.exit_y = exit_y
-		pipe.x = pipe_x
-		self.pipes.append(pipe)
-		self.pipes.sort(key=lambda item: item.entry_progress)
-		self.placing_pipe = None
 
 	def place_block(self, pos: Tuple[int, int]) -> None:
 		if not self.placing_block:
@@ -2272,6 +2119,7 @@ class SpiralGame:
 		progress = max(0.0, min(progress, 1.0))
 		return progress * self.track_total
 
+	# Legacy helper kept for reference after removing the vertical pipe mechanic.
 	def pipe_progress_from_rect(self, rect: pygame.Rect) -> Tuple[float, float]:
 		entry_y = rect.top + 10
 		exit_y = rect.bottom - 10
@@ -2549,43 +2397,6 @@ class SpiralGame:
 			self.spawn_ball()
 			self.rapid_fire_timer -= RAPID_FIRE_INTERVAL
 
-	def apply_pipe(self, ball: Ball, dt: float) -> bool:
-		if not self.pipes:
-			return False
-		multiplier = self.speed_boost_multiplier()
-		if ball.in_pipe:
-			pipe = self.get_pipe_by_id(ball.pipe_id)
-			if not pipe or not pipe.rect:
-				ball.in_pipe = False
-				ball.pipe_id = None
-				return False
-			exit_y = pipe.exit_y or (pipe.rect.bottom - 10)
-			ball.pipe_y += PIPE_SPEED * multiplier * dt
-			if ball.pipe_y >= exit_y:
-				ball.pipe_y = exit_y
-				ball.in_pipe = False
-				ball.pipe_id = None
-				ball.used_pipes.add(pipe.id)
-				exit_distance = self.progress_to_distance(pipe.exit_progress)
-				ball.distance = max(ball.distance, exit_distance)
-				ball.last_distance = ball.distance
-			return True
-		for pipe in self.pipes:
-			if pipe.id in ball.used_pipes or not pipe.rect:
-				continue
-			entry_distance = self.progress_to_distance(pipe.entry_progress)
-			if ball.last_distance < entry_distance <= ball.distance:
-				ball.in_pipe = True
-				ball.pipe_id = pipe.id
-				entry_y = pipe.entry_y or (pipe.rect.top + 10)
-				ball.pipe_y = entry_y
-				ball.pipe_x = pipe.x or pipe.rect.centerx
-				ball.speed = 0.0
-				ball.distance = max(ball.distance, entry_distance)
-				ball.last_distance = ball.distance
-				return True
-		return False
-
 	def apply_block_effects(self, ball: Ball) -> None:
 		if not self.blocks:
 			return
@@ -2628,8 +2439,6 @@ class SpiralGame:
 		if len(self.portals) < 2:
 			return
 		if self.portal_state != "active":
-			return
-		if ball.in_pipe:
 			return
 		ordered = sorted(
 			self.portals[:2],
@@ -2730,25 +2539,6 @@ class SpiralGame:
 		if self.portal_state == "cooldown" and now >= self.portal_cooldown_until:
 			self.activate_portals(now)
 
-	def clone_pipes(self) -> List[PipeItem]:
-		"""Make deep copies of all placed pipes so layouts can persist."""
-		clones: List[PipeItem] = []
-		for pipe in self.pipes:
-			rect_copy = pipe.rect.copy() if pipe.rect else None
-			clones.append(
-				PipeItem(
-					id=pipe.id,
-					cost=pipe.cost,
-					rect=rect_copy,
-					entry_progress=pipe.entry_progress,
-					exit_progress=pipe.exit_progress,
-					entry_y=pipe.entry_y,
-					exit_y=pipe.exit_y,
-					x=pipe.x,
-				)
-			)
-		return clones
-
 	def clone_blocks(self) -> List[BlockItem]:
 		"""Carry block placements forward with refreshed timers."""
 		clones: List[BlockItem] = []
@@ -2838,17 +2628,9 @@ class SpiralGame:
 			)
 		return clones
 
-	def get_pipe_by_id(self, pipe_id: Optional[int]) -> Optional[PipeItem]:
-		if pipe_id is None:
-			return None
-		for pipe in self.pipes:
-			if pipe.id == pipe_id:
-				return pipe
-		return None
-
 
 def main() -> None:
-	SpiralGame().run()
+	SpiralGame(start_level=2).run()
 
 
 if __name__ == "__main__":
